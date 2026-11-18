@@ -2,6 +2,14 @@ import { Outlet } from "react-router";
 import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
+import {
+  NotificationInboxPrototype,
+  InboxHeaderSlot,
+  InboxNavSlot,
+  InboxFooterSlot,
+  InboxMain,
+  InboxOverlays,
+} from "~/components/notification-inbox.prototype";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
@@ -227,15 +235,25 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     isTeamAdmin: userIsTeamAdmin,
   } = loaderData;
 
-  return (
+  const showPrototype = import.meta.env.DEV;
+  const shell = (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        prototypeHeaderSlot={showPrototype && <InboxHeaderSlot />}
+        prototypeNavSlot={showPrototype && <InboxNavSlot />}
+        prototypeFooterSlot={showPrototype && <InboxFooterSlot />}
       />
       <main className="flex-1 overflow-y-auto">
-        <Outlet />
+        {showPrototype ? (
+          <InboxMain>
+            <Outlet />
+          </InboxMain>
+        ) : (
+          <Outlet />
+        )}
       </main>
       <DevUI
         users={users}
@@ -245,6 +263,18 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         countries={countries}
       />
       <Toaster position="bottom-right" richColors closeButton />
+      {showPrototype && <InboxOverlays />}
     </div>
+  );
+
+  if (!showPrototype) return shell;
+
+  return (
+    <NotificationInboxPrototype
+      role={currentUser?.role ?? null}
+      isTeamAdmin={userIsTeamAdmin}
+    >
+      {shell}
+    </NotificationInboxPrototype>
   );
 }
