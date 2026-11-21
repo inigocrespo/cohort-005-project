@@ -208,20 +208,24 @@ export async function action({ request }: Route.ActionArgs) {
   // instructor, or an admin.
   const access = await requireStaff(request, course.courseId);
 
+  let reply: ReturnType<typeof createComment>;
   try {
-    const reply = createComment(
+    reply = createComment(
       access.userId!,
       question.lessonId,
       question.id,
       parsed.data.body
     );
-    notifyCommentPosted(db, reply.id);
   } catch (error) {
     if (error instanceof Error) {
       return { ok: false, error: error.message };
     }
     throw error;
   }
+
+  // Outside the try: the reply is saved, so nothing here may report it as
+  // failed.
+  notifyCommentPosted(db, reply.id);
 
   return { ok: true };
 }

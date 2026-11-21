@@ -5,19 +5,20 @@ import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import { db } from "~/db";
 import { markAllRead, markRead, markUnread } from "~/lib/notifications.server";
+import { NotificationIntent } from "~/lib/notification-intents";
 
 // The one route that changes Notifications' read state. Submitting here makes
 // every loader on the page revalidate, so the bell's badge follows along.
 const notificationActionSchema = z.discriminatedUnion("intent", [
   z.object({
-    intent: z.literal("mark-read"),
+    intent: z.literal(NotificationIntent.MarkRead),
     notificationId: z.coerce.number().int(),
   }),
   z.object({
-    intent: z.literal("mark-unread"),
+    intent: z.literal(NotificationIntent.MarkUnread),
     notificationId: z.coerce.number().int(),
   }),
-  z.object({ intent: z.literal("mark-all-read") }),
+  z.object({ intent: z.literal(NotificationIntent.MarkAllRead) }),
 ]);
 
 export async function action({ request }: Route.ActionArgs) {
@@ -39,13 +40,13 @@ export async function action({ request }: Route.ActionArgs) {
   // Each inbox function is scoped to the signed-in person, so another
   // person's Notification id changes nothing.
   switch (parsed.data.intent) {
-    case "mark-read":
+    case NotificationIntent.MarkRead:
       markRead(db, currentUserId, parsed.data.notificationId);
       break;
-    case "mark-unread":
+    case NotificationIntent.MarkUnread:
       markUnread(db, currentUserId, parsed.data.notificationId);
       break;
-    case "mark-all-read":
+    case NotificationIntent.MarkAllRead:
       markAllRead(db, currentUserId);
       break;
   }

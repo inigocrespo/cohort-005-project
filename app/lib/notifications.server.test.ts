@@ -376,6 +376,11 @@ describe("Refund Request decided", () => {
       .get();
   }
 
+  function teamLicenceOf(seat: typeof schema.coupons.$inferSelect) {
+    if (seat.purchaseId === null) throw new Error("Seat has no Team Licence");
+    return seat.purchaseId;
+  }
+
   function raise(purchaseId: number) {
     return db
       .insert(schema.refunds)
@@ -425,7 +430,7 @@ describe("Refund Request decided", () => {
     expect(inbox.notifications).toEqual([
       expect.objectContaining({
         kind: NotificationKind.RefundRequestDecided,
-        headline: "Your refund request for Test Course was approved",
+        headline: "Your Refund Request for Test Course was approved",
         link: "/settings",
         isRead: false,
       }),
@@ -442,7 +447,7 @@ describe("Refund Request decided", () => {
     expect(inbox.notifications).toEqual([
       expect.objectContaining({
         kind: NotificationKind.RefundRequestDecided,
-        headline: "Your refund request for Test Course was declined",
+        headline: "Your Refund Request for Test Course was declined",
         link: "/settings",
         isRead: false,
       }),
@@ -451,13 +456,13 @@ describe("Refund Request decided", () => {
 
   it("gives the Team Admin of a Team Licence a Notification linking to the Team page", () => {
     const [seat] = buySeats(teamAdmin.id, 2);
-    const refundRequestId = raise(seat.purchaseId!);
+    const refundRequestId = raise(teamLicenceOf(seat));
 
     approve(refundRequestId);
 
     expect(getInbox(db, teamAdmin.id).notifications).toEqual([
       expect.objectContaining({
-        headline: "Your refund request for Test Course was approved",
+        headline: "Your Refund Request for Test Course was approved",
         link: "/team",
       }),
     ]);
@@ -483,7 +488,7 @@ describe("Refund Request decided", () => {
     const [seat] = buySeats(teamAdmin.id, 2);
     const ana = addPerson("Ana");
     claimSeat(seat.id, ana.id);
-    const refundRequestId = raise(seat.purchaseId!);
+    const refundRequestId = raise(teamLicenceOf(seat));
 
     decline(refundRequestId);
 
@@ -498,7 +503,7 @@ describe("Refund Request decided", () => {
   it("records nothing when an approval is refused because a Seat is claimed", () => {
     const [seat] = buySeats(teamAdmin.id, 2);
     claimSeat(seat.id, addPerson("Ana").id);
-    const refundRequestId = raise(seat.purchaseId!);
+    const refundRequestId = raise(teamLicenceOf(seat));
 
     expect(approve(refundRequestId).ok).toBe(false);
     notifyRefundRequestDecided(db, refundRequestId);
@@ -517,7 +522,7 @@ describe("Refund Request decided", () => {
 
     expect(getInbox(db, buyer.id).notifications).toEqual([
       expect.objectContaining({
-        headline: "Your refund request for Test Course was approved",
+        headline: "Your Refund Request for Test Course was approved",
       }),
     ]);
   });
@@ -545,7 +550,7 @@ describe("Refund Request decided", () => {
       .run();
 
     expect(getInbox(db, buyer.id).notifications[0].headline).toBe(
-      "Your refund request for Test Course was approved"
+      "Your Refund Request for Test Course was approved"
     );
   });
 

@@ -1,6 +1,4 @@
 import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import * as schema from "~/db/schema";
 import {
   comments,
   coupons,
@@ -16,23 +14,101 @@ import {
   UserRole,
 } from "~/db/schema";
 import { commentAnchor } from "~/lib/comments";
+import {
+  buyerPagePath,
+  getSeats,
+  kindOf,
+  type PurchaseKind,
+  type Queryable,
+} from "~/lib/refunds.server";
 
 // ─── Notifications ───
 // The only code that reads or writes Notifications. See GLOSSARY.md.
 //
-// Two halves:
+// Three parts:
+// - Headlines and links: what each kind of Notification says and where it
+//   points, written once here.
 // - Event recorders (`notify…`): each takes the id of the thing that just
 //   happened, works out who to tell as things are right now, leaves out the
 //   person who acted, and writes one Notification per recipient with its
 //   headline and link. Callers never pass recipients, headlines or links.
 // - The inbox: everything a person sees of their own Notifications.
 //
-// Every function takes the database first, so tests can hand in an in-memory
-// one. Uses positional parameters (project convention).
+// Every function that reads or writes takes the database first, so tests can
+// hand in an in-memory one. Uses positional parameters (project convention).
 
-export type Db = BetterSQLite3Database<typeof schema>;
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-type Queryable = Db | Tx;
+// ─── Headlines and links ───
+// The recorders build every Notification from these, and so does the seed. A
+// headline may name people, courses and lessons, but never quotes a comment
+// body, a Refund Request reason or a decision note.
+
+export function refundRequestRaisedHeadline(
+  buyerName: string,
+  courseTitle: string
+): string {
+  return `${buyerName} raised a Refund Request for ${courseTitle}`;
+}
+
+export function refundRequestRaisedLink(): string {
+  return "/admin/refunds";
+}
+
+export type RefundRequestDecision =
+  RefundStatus.Approved | RefundStatus.Declined;
+
+const DECISION_WORDS: Record<RefundRequestDecision, string> = {
+  [RefundStatus.Approved]: "approved",
+  [RefundStatus.Declined]: "declined",
+};
+
+export function refundRequestDecidedHeadline(
+  courseTitle: string,
+  decision: RefundRequestDecision
+): string {
+  return `Your Refund Request for ${courseTitle} was ${DECISION_WORDS[decision]}`;
+}
+
+export function refundRequestDecidedLink(purchaseKind: PurchaseKind): string {
+  return buyerPagePath(purchaseKind);
+}
+
+export function replyHeadline(
+  replierName: string,
+  lessonTitle: string
+): string {
+  return `${replierName} replied to your comment on ${lessonTitle}`;
+}
+
+/** The reply itself, on its lesson page. */
+export function replyLink(
+  courseSlug: string,
+  lessonId: number,
+  replyId: number
+): string {
+  return `/courses/${courseSlug}/lessons/${lessonId}#${commentAnchor(replyId)}`;
+}
+
+export function newQuestionHeadline(
+  authorName: string,
+  lessonTitle: string
+): string {
+  return `${authorName} asked a Question on ${lessonTitle}`;
+}
+
+export function newQuestionLink(): string {
+  return "/instructor/questions";
+}
+
+export function seatClaimedHeadline(
+  studentName: string,
+  courseTitle: string
+): string {
+  return `${studentName} claimed a Seat on ${courseTitle}`;
+}
+
+export function seatClaimedLink(): string {
+  return "/team";
+}
 
 // ─── Event recorders ───
 
@@ -44,7 +120,7 @@ export function notifyRefundRequestRaised(
   db: Queryable,
   refundRequestId: number
 ): void {
-  const raised = db
+  const refundRequest = db
     .select({
       buyerId: users.id,
       buyerName: users.name,
@@ -57,22 +133,27 @@ export function notifyRefundRequestRaised(
     .where(eq(refunds.id, refundRequestId))
     .get();
 
-  if (!raised) return;
+  if (!refundRequest) return;
 
   // Nobody is told about their own action.
   const platformAdmins = db
     .select({ id: users.id })
     .from(users)
-    .where(and(eq(users.role, UserRole.Admin), ne(users.id, raised.buyerId)))
+    .where(
+      and(eq(users.role, UserRole.Admin), ne(users.id, refundRequest.buyerId))
+    )
     .all();
 
-  for (const admin of platformAdmins) {
+  for (const platformAdmin of platformAdmins) {
     db.insert(notifications)
       .values({
-        recipientId: admin.id,
+        recipientId: platformAdmin.id,
         kind: NotificationKind.RefundRequestRaised,
-        headline: `${raised.buyerName} raised a Refund Request for ${raised.courseTitle}`,
-        link: "/admin/refunds",
+        headline: refundRequestRaisedHeadline(
+          refundRequest.buyerName,
+          refundRequest.courseTitle
+        ),
+        link: refundRequestRaisedLink(),
       })
       .run();
   }
@@ -111,8 +192,8 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
     .values({
       recipientId: seat.buyerId,
       kind: NotificationKind.SeatClaimed,
-      headline: `${student.name} claimed a Seat on ${seat.courseTitle}`,
-      link: "/team",
+      headline: seatClaimedHeadline(student.name, seat.courseTitle),
+      link: seatClaimedLink(),
     })
     .run();
 }
@@ -144,19 +225,17 @@ export function notifyRefundRequestDecided(
   // Nobody is told about their own action.
   if (refundRequest.deciderId === refundRequest.buyerId) return;
 
-  // A Team Licence is the Purchase that granted Seats (see refunds.server).
-  const grantedSeat = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, refundRequest.purchaseId))
-    .get();
+  const purchaseKind = kindOf(getSeats(db, refundRequest.purchaseId));
 
   db.insert(notifications)
     .values({
       recipientId: refundRequest.buyerId,
       kind: NotificationKind.RefundRequestDecided,
-      headline: `Your refund request for ${refundRequest.courseTitle} was ${refundRequest.status}`,
-      link: grantedSeat ? "/team" : "/settings",
+      headline: refundRequestDecidedHeadline(
+        refundRequest.courseTitle,
+        refundRequest.status
+      ),
+      link: refundRequestDecidedLink(purchaseKind),
     })
     .run();
 }
@@ -224,8 +303,8 @@ function notifyReply(
     .values({
       recipientId: parent.authorId,
       kind: NotificationKind.Reply,
-      headline: `${reply.authorName} replied to your comment on ${reply.lessonTitle}`,
-      link: `/courses/${reply.courseSlug}/lessons/${reply.lessonId}#${commentAnchor(reply.id)}`,
+      headline: replyHeadline(reply.authorName, reply.lessonTitle),
+      link: replyLink(reply.courseSlug, reply.lessonId, reply.id),
     })
     .run();
 }
@@ -249,8 +328,8 @@ function notifyNewQuestion(
     .values({
       recipientId: question.instructorId,
       kind: NotificationKind.NewQuestion,
-      headline: `${question.authorName} asked a Question on ${question.lessonTitle}`,
-      link: "/instructor/questions",
+      headline: newQuestionHeadline(question.authorName, question.lessonTitle),
+      link: newQuestionLink(),
     })
     .run();
 }

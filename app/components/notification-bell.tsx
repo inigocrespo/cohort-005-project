@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { NotificationKind } from "~/db/schema";
 import type { Inbox, InboxNotification } from "~/lib/notifications.server";
+import { NotificationIntent } from "~/lib/notification-intents";
 import { cn, formatRelativeTime } from "~/lib/utils";
 
 const KIND_ICONS: Record<NotificationKind, ReactNode> = {
@@ -41,7 +42,10 @@ export function NotificationBell({ inbox }: { inbox: Inbox }) {
     setIsOpen(false);
     if (!notification.isRead) {
       await markReadFetcher.submit(
-        { intent: "mark-read", notificationId: notification.id },
+        {
+          intent: NotificationIntent.MarkRead,
+          notificationId: notification.id,
+        },
         { method: "post", action: NOTIFICATIONS_ACTION }
       );
     }
@@ -141,7 +145,9 @@ function ReadToggle({ notification }: { notification: InboxNotification }) {
         event.stopPropagation();
         fetcher.submit(
           {
-            intent: notification.isRead ? "mark-unread" : "mark-read",
+            intent: notification.isRead
+              ? NotificationIntent.MarkUnread
+              : NotificationIntent.MarkRead,
             notificationId: notification.id,
           },
           { method: "post", action: NOTIFICATIONS_ACTION }
@@ -169,7 +175,7 @@ function MarkAllRead({ disabled }: { disabled: boolean }) {
       disabled={disabled}
       onClick={() =>
         fetcher.submit(
-          { intent: "mark-all-read" },
+          { intent: NotificationIntent.MarkAllRead },
           { method: "post", action: NOTIFICATIONS_ACTION }
         )
       }

@@ -15,7 +15,19 @@ import {
   TeamMemberRole,
   NotificationKind,
 } from "../app/db/schema";
-import { commentAnchor } from "../app/lib/comments";
+import {
+  newQuestionHeadline,
+  newQuestionLink,
+  refundRequestDecidedHeadline,
+  refundRequestDecidedLink,
+  refundRequestRaisedHeadline,
+  refundRequestRaisedLink,
+  replyHeadline,
+  replyLink,
+  seatClaimedHeadline,
+  seatClaimedLink,
+} from "../app/lib/notifications.server";
+import { getSeats, kindOf } from "../app/lib/refunds.server";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1997,34 +2009,50 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.comments)} lesson comments across ${countRows(schema.comments, isNull(schema.comments.parentId))} threads.`
   );
 
-  // Sarah's New Question Notifications: she has seen the ones she answered,
-  // not the two still waiting. Headlines match what notifyCommentPosted writes.
-  function newQuestionHeadline(question: typeof schema.comments.$inferSelect) {
-    const author = db
+  type Comment = typeof schema.comments.$inferSelect;
+
+  function nameOf(userId: number) {
+    const user = db
       .select({ name: schema.users.name })
       .from(schema.users)
-      .where(eq(schema.users.id, question.userId))
-      .get()!;
-    const lesson = db
-      .select({ title: schema.lessons.title })
-      .from(schema.lessons)
-      .where(eq(schema.lessons.id, question.lessonId))
-      .get()!;
-    return `${author.name} asked a Question on ${lesson.title}`;
+      .where(eq(schema.users.id, userId))
+      .get();
+    if (!user) throw new Error(`No seeded user with id ${userId}`);
+    return user.name;
   }
+
+  function lessonOf(lessonId: number) {
+    const lesson = db
+      .select({ title: schema.lessons.title, courseSlug: schema.courses.slug })
+      .from(schema.lessons)
+      .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+      .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+      .where(eq(schema.lessons.id, lessonId))
+      .get();
+    if (!lesson) throw new Error(`No seeded lesson with id ${lessonId}`);
+    return lesson;
+  }
+
+  // Sarah's New Question Notifications: she has seen the ones she answered,
+  // not the three still waiting.
+  const sarahsQuestions: { question: Comment; readAt: string | null }[] = [
+    { question: c1q5, readAt: daysAgo(39) },
+    { question: c1q1, readAt: daysAgo(29) },
+    { question: c1q2, readAt: null },
+    { question: c1q3, readAt: null },
+    { question: c1q4, readAt: null },
+  ];
 
   db.insert(schema.notifications)
     .values(
-      [
-        { question: c1q5, readAt: daysAgo(39) },
-        { question: c1q1, readAt: daysAgo(29) },
-        { question: c1q2, readAt: null },
-        { question: c1q3, readAt: null },
-      ].map(({ question, readAt }) => ({
+      sarahsQuestions.map(({ question, readAt }) => ({
         recipientId: instructor1.id,
         kind: NotificationKind.NewQuestion,
-        headline: newQuestionHeadline(question),
-        link: "/instructor/questions",
+        headline: newQuestionHeadline(
+          nameOf(question.userId),
+          lessonOf(question.lessonId).title
+        ),
+        link: newQuestionLink(),
         createdAt: question.createdAt,
         readAt,
       }))
@@ -2034,33 +2062,23 @@ This course is still in draft while the cluster examples are rewritten against t
   // Reply Notifications: each Question's author hears about replies by anyone
   // else (Emma's own follow-up on c1q1 tells nobody). James has seen Sarah's
   // answer but not Emma's reply; Sophia's links to a reply under her deleted
-  // Question. Headlines and links match what notifyCommentPosted writes.
-  function replyNotification(
-    reply: typeof schema.comments.$inferSelect,
-    readAt: string | null
-  ) {
+  // Question.
+  function replyNotification(reply: Comment, readAt: string | null) {
+    if (reply.parentId === null) {
+      throw new Error(`Comment ${reply.id} is not a reply`);
+    }
     const question = db
       .select({ authorId: schema.comments.userId })
       .from(schema.comments)
-      .where(eq(schema.comments.id, reply.parentId!))
-      .get()!;
-    const replier = db
-      .select({ name: schema.users.name })
-      .from(schema.users)
-      .where(eq(schema.users.id, reply.userId))
-      .get()!;
-    const lesson = db
-      .select({ title: schema.lessons.title, courseSlug: schema.courses.slug })
-      .from(schema.lessons)
-      .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
-      .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
-      .where(eq(schema.lessons.id, reply.lessonId))
-      .get()!;
+      .where(eq(schema.comments.id, reply.parentId))
+      .get();
+    if (!question) throw new Error(`No Question for reply ${reply.id}`);
+    const lesson = lessonOf(reply.lessonId);
     return {
       recipientId: question.authorId,
       kind: NotificationKind.Reply,
-      headline: `${replier.name} replied to your comment on ${lesson.title}`,
-      link: `/courses/${lesson.courseSlug}/lessons/${reply.lessonId}#${commentAnchor(reply.id)}`,
+      headline: replyHeadline(nameOf(reply.userId), lesson.title),
+      link: replyLink(lesson.courseSlug, reply.lessonId, reply.id),
       createdAt: reply.createdAt,
       readAt,
     };
@@ -2436,18 +2454,30 @@ This course is still in draft while the cluster examples are rewritten against t
     .run();
 
   // Bossy's Seat claimed Notifications: she has seen Olivia's, not Liam's.
-  // Headlines match what notifySeatClaimed writes.
+  const bossysClaims: {
+    email: string;
+    claimedDaysAgo: number;
+    readAt: string | null;
+  }[] = [
+    {
+      email: "olivia.martinez@student.dev",
+      claimedDaysAgo: 30,
+      readAt: daysAgo(29),
+    },
+    { email: "liam@example.com", claimedDaysAgo: 25, readAt: null },
+  ];
+
   db.insert(schema.notifications)
     .values(
-      [
-        { email: "olivia.martinez@student.dev", at: 30, readAt: daysAgo(29) },
-        { email: "liam@example.com", at: 25, readAt: null },
-      ].map(({ email, at, readAt }) => ({
+      bossysClaims.map(({ email, claimedDaysAgo, readAt }) => ({
         recipientId: bossy.id,
         kind: NotificationKind.SeatClaimed,
-        headline: `${studentByEmail(email).name} claimed a Seat on ${course2.title}`,
-        link: "/team",
-        createdAt: daysAgo(at),
+        headline: seatClaimedHeadline(
+          studentByEmail(email).name,
+          course2.title
+        ),
+        link: seatClaimedLink(),
+        createdAt: daysAgo(claimedDaysAgo),
         readAt,
       }))
     )
@@ -2799,8 +2829,8 @@ This course is still in draft while the cluster examples are rewritten against t
         .values({
           recipientId: teamAdmin.id,
           kind: NotificationKind.SeatClaimed,
-          headline: `${redeemer.name} claimed a Seat on ${course.title}`,
-          link: "/team",
+          headline: seatClaimedHeadline(redeemer.name, course.title),
+          link: seatClaimedLink(),
           createdAt: daysAgo(redeemedDaysAgo),
           readAt: isUnread ? null : daysAgo(redeemedDaysAgo),
         })
@@ -2913,9 +2943,19 @@ This course is still in draft while the cluster examples are rewritten against t
 
   // ─── Decided Refund Requests ───
   // Declined ones, so nobody loses what they bought. Each buyer has the
-  // Refund Request decided Notification; headlines match what
-  // notifyRefundRequestDecided writes. Emma and Ava have read theirs, Sophia
+  // Refund Request decided Notification. Emma and Ava have read theirs, Sophia
   // hasn't yet.
+
+  type DeclinedRefundRequest = {
+    buyer: ReturnType<typeof studentByEmail>;
+    purchase: typeof schema.purchases.$inferSelect;
+    course: typeof course1;
+    reason: string;
+    note: string;
+    requestedDaysAgo: number;
+    decidedDaysAgo: number;
+    readDaysAgo: number | null;
+  };
 
   function individualPurchaseOf(email: string, course: typeof course1) {
     const buyer = studentByEmail(email);
@@ -2933,21 +2973,19 @@ This course is still in draft while the cluster examples are rewritten against t
     return { buyer, purchase };
   }
 
-  const declinedRefundRequests = [
+  const declinedRefundRequests: DeclinedRefundRequest[] = [
     {
       ...individualPurchaseOf("emma.wilson@student.dev", course2),
       course: course2,
-      link: "/settings",
       reason: "I thought this covered React Native as well.",
       note: "You have finished most of the course, so it is past what we refund.",
       requestedDaysAgo: 35,
       decidedDaysAgo: 34,
-      readDaysAgo: 33 as number | null,
+      readDaysAgo: 33,
     },
     {
       ...individualPurchaseOf("sophia.davis@student.dev", course1),
       course: course1,
-      link: "/settings",
       reason: "Money is tight this month.",
       note: "You have watched more than we can refund. Get in touch if that's wrong.",
       requestedDaysAgo: 3,
@@ -2958,24 +2996,23 @@ This course is still in draft while the cluster examples are rewritten against t
       buyer: studentByEmail("ava.nakamura@student.dev"),
       purchase: nakamuraLicence.purchase,
       course: course1,
-      link: "/team",
       reason: "We over-ordered seats.",
       note: "Seats on this Team Licence have been claimed, so it can't be refunded.",
       requestedDaysAgo: 110,
       decidedDaysAgo: 109,
-      readDaysAgo: 109 as number | null,
+      readDaysAgo: 109,
     },
   ];
 
-  for (const r of declinedRefundRequests) {
+  for (const refundRequest of declinedRefundRequests) {
     db.insert(schema.refunds)
       .values({
-        purchaseId: r.purchase.id,
+        purchaseId: refundRequest.purchase.id,
         status: RefundStatus.Declined,
-        reason: r.reason,
-        decisionNote: r.note,
-        requestedAt: daysAgo(r.requestedDaysAgo),
-        resolvedAt: daysAgo(r.decidedDaysAgo),
+        reason: refundRequest.reason,
+        decisionNote: refundRequest.note,
+        requestedAt: daysAgo(refundRequest.requestedDaysAgo),
+        resolvedAt: daysAgo(refundRequest.decidedDaysAgo),
         resolvedByUserId: admin.id,
       })
       .run();
@@ -2985,21 +3022,32 @@ This course is still in draft while the cluster examples are rewritten against t
       .values({
         recipientId: admin.id,
         kind: NotificationKind.RefundRequestRaised,
-        headline: `${r.buyer.name} raised a Refund Request for ${r.course.title}`,
-        link: "/admin/refunds",
-        createdAt: daysAgo(r.requestedDaysAgo),
-        readAt: daysAgo(r.decidedDaysAgo),
+        headline: refundRequestRaisedHeadline(
+          refundRequest.buyer.name,
+          refundRequest.course.title
+        ),
+        link: refundRequestRaisedLink(),
+        createdAt: daysAgo(refundRequest.requestedDaysAgo),
+        readAt: daysAgo(refundRequest.decidedDaysAgo),
       })
       .run();
 
     db.insert(schema.notifications)
       .values({
-        recipientId: r.buyer.id,
+        recipientId: refundRequest.buyer.id,
         kind: NotificationKind.RefundRequestDecided,
-        headline: `Your refund request for ${r.course.title} was declined`,
-        link: r.link,
-        createdAt: daysAgo(r.decidedDaysAgo),
-        readAt: r.readDaysAgo === null ? null : daysAgo(r.readDaysAgo),
+        headline: refundRequestDecidedHeadline(
+          refundRequest.course.title,
+          RefundStatus.Declined
+        ),
+        link: refundRequestDecidedLink(
+          kindOf(getSeats(db, refundRequest.purchase.id))
+        ),
+        createdAt: daysAgo(refundRequest.decidedDaysAgo),
+        readAt:
+          refundRequest.readDaysAgo === null
+            ? null
+            : daysAgo(refundRequest.readDaysAgo),
       })
       .run();
   }
@@ -3009,8 +3057,7 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // ─── Refund Request raised Notifications ───
-  // Alex has seen Liam's, not Marta's. Headlines match what
-  // notifyRefundRequestRaised writes.
+  // Alex has seen Liam's, not Marta's.
 
   const marta = studentByEmail("marta.novak@student.dev");
   db.insert(schema.notifications)
@@ -3018,16 +3065,16 @@ This course is still in draft while the cluster examples are rewritten against t
       {
         recipientId: admin.id,
         kind: NotificationKind.RefundRequestRaised,
-        headline: `${liam.name} raised a Refund Request for ${course1.title}`,
-        link: "/admin/refunds",
+        headline: refundRequestRaisedHeadline(liam.name, course1.title),
+        link: refundRequestRaisedLink(),
         createdAt: daysAgo(4),
         readAt: daysAgo(3),
       },
       {
         recipientId: admin.id,
         kind: NotificationKind.RefundRequestRaised,
-        headline: `${marta.name} raised a Refund Request for ${course3.title}`,
-        link: "/admin/refunds",
+        headline: refundRequestRaisedHeadline(marta.name, course3.title),
+        link: refundRequestRaisedLink(),
         createdAt: daysAgo(1),
         readAt: null,
       },
