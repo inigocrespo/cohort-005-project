@@ -5,6 +5,9 @@ import * as schema from "~/db/schema";
 import { NotificationKind, RefundStatus, UserRole } from "~/db/schema";
 import {
   getInbox,
+  markAllRead,
+  markRead,
+  markUnread,
   notifyCommentPosted,
   notifyRefundRequestDecided,
   notifyRefundRequestRaised,
@@ -13,6 +16,7 @@ import {
 import {
   approveRefundRequest,
   declineRefundRequest,
+  listRefundRequestsForReview,
   raiseRefundRequest,
 } from "./refunds.server";
 
@@ -636,6 +640,136 @@ describe("Inbox", () => {
     expect(inbox.notifications.map((n) => n.headline)).toEqual([
       "Ana claimed a Seat on Test Course",
     ]);
+  });
+});
+
+describe("Read state", () => {
+  function notifyTeamAdmin(studentName: string) {
+    const [seat] = buySeats(teamAdmin.id, 1);
+    claimSeat(seat.id, addPerson(studentName).id);
+    return getInbox(db, teamAdmin.id).notifications[0];
+  }
+
+  it("marks a Notification read, taking it off the unread count", () => {
+    const notification = notifyTeamAdmin("Ana");
+
+    markRead(db, teamAdmin.id, notification.id);
+
+    const inbox = getInbox(db, teamAdmin.id);
+    expect(inbox.unreadCount).toBe(0);
+    expect(inbox.badgeLabel).toBeNull();
+    expect(inbox.notifications[0]).toMatchObject({
+      id: notification.id,
+      isRead: true,
+    });
+  });
+
+  it("changes nothing when asked to mark someone else's Notification", () => {
+    const notification = notifyTeamAdmin("Ana");
+    const stranger = addPerson("Sam");
+
+    markRead(db, stranger.id, notification.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(1);
+  });
+
+  it("marks a read Notification unread again, putting it back on the count", () => {
+    const notification = notifyTeamAdmin("Ana");
+    markRead(db, teamAdmin.id, notification.id);
+
+    markUnread(db, teamAdmin.id, notification.id);
+
+    const inbox = getInbox(db, teamAdmin.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications[0].isRead).toBe(false);
+  });
+
+  it("won't mark someone else's Notification unread", () => {
+    const notification = notifyTeamAdmin("Ana");
+    markRead(db, teamAdmin.id, notification.id);
+
+    markUnread(db, addPerson("Sam").id, notification.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+  });
+
+  it("marks all read, including Notifications beyond the newest 20", () => {
+    const seats = buySeats(teamAdmin.id, 25);
+    seats.forEach((seat, i) => claimSeat(seat.id, addPerson(`S${i}`).id));
+
+    markAllRead(db, teamAdmin.id);
+
+    // The unread count spans every Notification, not just the listed 20.
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+  });
+
+  it("marks all read for only the given person", () => {
+    notifyTeamAdmin("Ana");
+    const otherTeamAdmin = addPerson("Otto");
+    const [theirs] = buySeats(otherTeamAdmin.id, 1);
+    claimSeat(theirs.id, addPerson("Ben").id);
+
+    markAllRead(db, teamAdmin.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+    expect(getInbox(db, otherTeamAdmin.id).unreadCount).toBe(1);
+  });
+
+  function addPlatformAdmin(name: string) {
+    const person = addPerson(name);
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, person.id))
+      .run();
+    return person;
+  }
+
+  // A buyer raises a Refund Request, telling every Platform Admin.
+  function raiseRefundRequestFor(buyerName: string) {
+    const buyer = addPerson(buyerName);
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyer.id,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: NOW.toISOString(),
+      })
+      .returning()
+      .get();
+    const raised = raiseRefundRequest(
+      db,
+      purchase.id,
+      buyer.id,
+      "It was not what I expected at all.",
+      NOW
+    );
+    if (!raised.ok) throw new Error(raised.error);
+    notifyRefundRequestRaised(db, raised.refundRequestId);
+    return raised.refundRequestId;
+  }
+
+  it("leaves another person's copy of the same event unread", () => {
+    const pat = addPlatformAdmin("Pat");
+    const ada = addPlatformAdmin("Ada");
+    raiseRefundRequestFor("Liam");
+
+    markRead(db, pat.id, getInbox(db, pat.id).notifications[0].id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    expect(getInbox(db, ada.id).unreadCount).toBe(1);
+  });
+
+  it("leaves the Refund Requests work queue alone when marking all read", () => {
+    const pat = addPlatformAdmin("Pat");
+    const refundRequestId = raiseRefundRequestFor("Liam");
+
+    markAllRead(db, pat.id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    expect(
+      listRefundRequestsForReview(db, RefundStatus.Open, NOW).map((r) => r.id)
+    ).toEqual([refundRequestId]);
   });
 });
 
