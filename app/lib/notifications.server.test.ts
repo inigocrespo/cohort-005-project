@@ -5,6 +5,7 @@ import * as schema from "~/db/schema";
 import { NotificationKind, UserRole } from "~/db/schema";
 import {
   getInbox,
+  notifyCommentPosted,
   notifyRefundRequestRaised,
   notifySeatClaimed,
 } from "./notifications.server";
@@ -407,5 +408,115 @@ describe("Inbox", () => {
     expect(inbox.notifications.map((n) => n.headline)).toEqual([
       "Ana claimed a Seat on Test Course",
     ]);
+  });
+});
+
+describe("New Question", () => {
+  let lesson: typeof schema.lessons.$inferSelect;
+
+  beforeEach(() => {
+    const mod = db
+      .insert(schema.modules)
+      .values({ courseId: base.course.id, title: "Basics", position: 1 })
+      .returning()
+      .get();
+    lesson = db
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: "Lesson 3: Loops", position: 1 })
+      .returning()
+      .get();
+  });
+
+  function postComment(userId: number, body = "How do I break out early?") {
+    const comment = db
+      .insert(schema.comments)
+      .values({ userId, lessonId: lesson.id, body })
+      .returning()
+      .get();
+    notifyCommentPosted(db, comment.id);
+    return comment;
+  }
+
+  it("gives the course's Instructor one unread Notification linking to the Instructor Questions page, naming the Student and the lesson", () => {
+    const ana = addPerson("Ana");
+
+    postComment(ana.id);
+
+    const inbox = getInbox(db, base.instructor.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.NewQuestion,
+        headline: "Ana asked a Question on Lesson 3: Loops",
+        link: "/instructor/questions",
+        isRead: false,
+      }),
+    ]);
+  });
+
+  it("tells no Platform Admin and not the Student who asked", () => {
+    const admin = addPerson("Ada");
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, admin.id))
+      .run();
+    const ana = addPerson("Ana");
+
+    postComment(ana.id);
+
+    expect(getInbox(db, admin.id).notifications).toEqual([]);
+    expect(getInbox(db, ana.id).notifications).toEqual([]);
+  });
+
+  it("tells nobody when the course's Instructor posts a top-level comment", () => {
+    postComment(base.instructor.id);
+
+    expect(getInbox(db, base.instructor.id).notifications).toEqual([]);
+  });
+
+  it("tells nobody when a Platform Admin posts a top-level comment", () => {
+    const admin = addPerson("Ada");
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, admin.id))
+      .run();
+
+    postComment(admin.id);
+
+    expect(getInbox(db, base.instructor.id).notifications).toEqual([]);
+    expect(getInbox(db, admin.id).notifications).toEqual([]);
+  });
+
+  it("records nothing for a comment that doesn't exist", () => {
+    notifyCommentPosted(db, 9999);
+
+    expect(getInbox(db, base.instructor.id).unreadCount).toBe(0);
+  });
+
+  it("never quotes the comment body in the headline", () => {
+    postComment(addPerson("Ana").id, "SECRET-BODY-TEXT");
+
+    const [notification] = getInbox(db, base.instructor.id).notifications;
+    expect(notification.headline).not.toContain("SECRET-BODY-TEXT");
+  });
+
+  it("keeps its headline after the Question is edited or soft-deleted", () => {
+    const question = postComment(addPerson("Ana").id);
+
+    db.update(schema.comments)
+      .set({ body: "Edited", editedAt: NOW.toISOString() })
+      .where(eq(schema.comments.id, question.id))
+      .run();
+    expect(getInbox(db, base.instructor.id).notifications[0].headline).toBe(
+      "Ana asked a Question on Lesson 3: Loops"
+    );
+
+    db.update(schema.comments)
+      .set({ deletedAt: NOW.toISOString() })
+      .where(eq(schema.comments.id, question.id))
+      .run();
+    expect(getInbox(db, base.instructor.id).notifications[0].headline).toBe(
+      "Ana asked a Question on Lesson 3: Loops"
+    );
   });
 });
