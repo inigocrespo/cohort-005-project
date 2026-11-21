@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
@@ -10,6 +10,7 @@ import {
   users,
   NotificationKind,
   RefundStatus,
+  UserRole,
 } from "~/db/schema";
 
 // ─── Notifications ───
@@ -30,6 +31,48 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Queryable = Db | Tx;
 
 // ─── Event recorders ───
+
+/**
+ * A buyer has just raised a Refund Request. Tells every user who is a Platform
+ * Admin right now, except the buyer. The headline never quotes the reason.
+ */
+export function notifyRefundRequestRaised(
+  db: Queryable,
+  refundRequestId: number
+): void {
+  const raised = db
+    .select({
+      buyerId: users.id,
+      buyerName: users.name,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!raised) return;
+
+  // Nobody is told about their own action.
+  const platformAdmins = db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, UserRole.Admin), ne(users.id, raised.buyerId)))
+    .all();
+
+  for (const admin of platformAdmins) {
+    db.insert(notifications)
+      .values({
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${raised.buyerName} raised a Refund Request for ${raised.courseTitle}`,
+        link: "/admin/refunds",
+      })
+      .run();
+  }
+}
 
 /**
  * A Student has just claimed a Seat. Tells the Team Admin who bought its Team

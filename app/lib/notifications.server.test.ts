@@ -6,11 +6,13 @@ import { NotificationKind, RefundStatus, UserRole } from "~/db/schema";
 import {
   getInbox,
   notifyRefundRequestDecided,
+  notifyRefundRequestRaised,
   notifySeatClaimed,
 } from "./notifications.server";
 import {
   approveRefundRequest,
   declineRefundRequest,
+  raiseRefundRequest,
 } from "./refunds.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
@@ -145,6 +147,204 @@ describe("Seat claimed", () => {
   });
 });
 
+describe("Refund Request raised", () => {
+  const REASON = "It was not what I expected at all.";
+
+  function addPlatformAdmin(name: string) {
+    const person = addPerson(name);
+    setRole(person.id, UserRole.Admin);
+    return person;
+  }
+
+  function setRole(userId: number, role: UserRole) {
+    db.update(schema.users)
+      .set({ role })
+      .where(eq(schema.users.id, userId))
+      .run();
+  }
+
+  function buyForSelf(userId: number, daysAgo = 0) {
+    const purchasedAt = new Date(NOW);
+    purchasedAt.setDate(purchasedAt.getDate() - daysAgo);
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: purchasedAt.toISOString(),
+      })
+      .returning()
+      .get();
+    db.insert(schema.enrollments)
+      .values({ userId, courseId: base.course.id })
+      .run();
+    return purchase;
+  }
+
+  // Mirrors the route: record only once the Refund Request has been raised.
+  function raise(purchaseId: number, buyerId: number) {
+    const result = raiseRefundRequest(db, purchaseId, buyerId, REASON, NOW);
+    if (result.ok) notifyRefundRequestRaised(db, result.refundRequestId);
+    return result;
+  }
+
+  it("gives a Platform Admin one unread Notification linking to the Refund Requests page, naming the buyer and the course", () => {
+    const pat = addPlatformAdmin("Pat");
+    const liam = addPerson("Liam");
+
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    const inbox = getInbox(db, pat.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.RefundRequestRaised,
+        headline: "Liam raised a Refund Request for Test Course",
+        link: "/admin/refunds",
+        isRead: false,
+      }),
+    ]);
+  });
+
+  it("gives every Platform Admin their own Notification", () => {
+    const pat = addPlatformAdmin("Pat");
+    const quinn = addPlatformAdmin("Quinn");
+    const liam = addPerson("Liam");
+
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(1);
+    expect(getInbox(db, quinn.id).unreadCount).toBe(1);
+  });
+
+  it("tells nobody else: not the buyer, nor Students or Instructors", () => {
+    addPlatformAdmin("Pat");
+    const liam = addPerson("Liam");
+
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    expect(getInbox(db, liam.id).unreadCount).toBe(0);
+    expect(getInbox(db, base.user.id).unreadCount).toBe(0);
+    expect(getInbox(db, base.instructor.id).unreadCount).toBe(0);
+  });
+
+  it("doesn't tell a Platform Admin about a Refund Request on their own Purchase", () => {
+    const pat = addPlatformAdmin("Pat");
+    const quinn = addPlatformAdmin("Quinn");
+
+    raise(buyForSelf(pat.id).id, pat.id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    expect(getInbox(db, quinn.id).notifications).toEqual([
+      expect.objectContaining({
+        headline: "Pat raised a Refund Request for Test Course",
+      }),
+    ]);
+  });
+
+  it("gives no Notification for earlier Refund Requests to someone promoted to Platform Admin afterwards", () => {
+    const liam = addPerson("Liam");
+    const ana = addPerson("Ana");
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    setRole(ana.id, UserRole.Admin);
+
+    expect(getInbox(db, ana.id).notifications).toEqual([]);
+  });
+
+  it("lets a demoted Platform Admin keep the Notifications they already had", () => {
+    const pat = addPlatformAdmin("Pat");
+    const liam = addPerson("Liam");
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    setRole(pat.id, UserRole.Student);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(1);
+  });
+
+  describe("records nothing when the Refund Request fails to raise", () => {
+    let pat: typeof schema.users.$inferSelect;
+    let liam: typeof schema.users.$inferSelect;
+
+    beforeEach(() => {
+      pat = addPlatformAdmin("Pat");
+      liam = addPerson("Liam");
+    });
+
+    it("because the person isn't the buyer", () => {
+      const purchase = buyForSelf(liam.id);
+
+      expect(raise(purchase.id, addPerson("Ana").id).ok).toBe(false);
+      expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    });
+
+    it("because one is already open", () => {
+      const purchase = buyForSelf(liam.id);
+      raise(purchase.id, liam.id);
+
+      expect(raise(purchase.id, liam.id).ok).toBe(false);
+      expect(getInbox(db, pat.id).unreadCount).toBe(1);
+    });
+
+    it("because the Purchase is already refunded", () => {
+      const purchase = buyForSelf(liam.id);
+      const first = raise(purchase.id, liam.id);
+      if (!first.ok) throw new Error(first.error);
+      approveRefundRequest(db, first.refundRequestId, pat.id, null, NOW);
+
+      expect(raise(purchase.id, liam.id).ok).toBe(false);
+      expect(getInbox(db, pat.id).unreadCount).toBe(1);
+    });
+
+    it("because it breaks a rule", () => {
+      const purchase = buyForSelf(liam.id, 30);
+
+      expect(raise(purchase.id, liam.id).ok).toBe(false);
+      expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    });
+
+    it("because there is no such Refund Request", () => {
+      notifyRefundRequestRaised(db, 999);
+
+      expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    });
+  });
+
+  it("never quotes the Refund Request reason in the headline", () => {
+    const pat = addPlatformAdmin("Pat");
+    const liam = addPerson("Liam");
+
+    raise(buyForSelf(liam.id).id, liam.id);
+
+    expect(getInbox(db, pat.id).notifications[0].headline).not.toContain(
+      "not what I expected"
+    );
+  });
+
+  it("keeps its headline and its read state after the Refund Request is decided and the buyer renamed", () => {
+    const pat = addPlatformAdmin("Pat");
+    const quinn = addPlatformAdmin("Quinn");
+    const liam = addPerson("Liam");
+    const raised = raise(buyForSelf(liam.id).id, liam.id);
+    if (!raised.ok) throw new Error(raised.error);
+
+    approveRefundRequest(db, raised.refundRequestId, quinn.id, null, NOW);
+    db.update(schema.users)
+      .set({ name: "William" })
+      .where(eq(schema.users.id, liam.id))
+      .run();
+
+    expect(getInbox(db, pat.id).notifications).toEqual([
+      expect.objectContaining({
+        headline: "Liam raised a Refund Request for Test Course",
+        link: "/admin/refunds",
+        isRead: false,
+      }),
+    ]);
+  });
+});
+
 describe("Refund Request decided", () => {
   let platformAdmin: typeof schema.users.$inferSelect;
   let buyer: typeof schema.users.$inferSelect;
@@ -161,7 +361,12 @@ describe("Refund Request decided", () => {
   function buyIndividually(userId: number) {
     return db
       .insert(schema.purchases)
-      .values({ userId, courseId: base.course.id, amountPaid: 7900 })
+      .values({
+        userId,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: NOW.toISOString(),
+      })
       .returning()
       .get();
   }
@@ -339,32 +544,27 @@ describe("Refund Request decided", () => {
     );
   });
 
-  it("leaves other Platform Admins' Notifications as they were", () => {
+  it("leaves other Platform Admins' Refund Request raised Notifications as they were", () => {
     const otherAdmin = addPerson("Otto");
-    // Their "Refund Request raised" Notifications, one read and one not.
-    db.insert(schema.notifications)
-      .values([
-        {
-          recipientId: otherAdmin.id,
-          kind: NotificationKind.RefundRequestRaised,
-          headline: "Bea requested a refund for Test Course",
-          link: "/admin/refunds",
-          readAt: NOW.toISOString(),
-        },
-        {
-          recipientId: otherAdmin.id,
-          kind: NotificationKind.RefundRequestRaised,
-          headline: "Bea requested a refund for Test Course",
-          link: "/admin/refunds",
-        },
-      ])
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, otherAdmin.id))
       .run();
+    const raised = raiseRefundRequest(
+      db,
+      buyIndividually(buyer.id).id,
+      buyer.id,
+      "Secret reason nobody else should read",
+      NOW
+    );
+    if (!raised.ok) throw new Error(raised.error);
+    notifyRefundRequestRaised(db, raised.refundRequestId);
     const before = getInbox(db, otherAdmin.id);
 
-    approve(raise(buyIndividually(buyer.id).id));
+    approve(raised.refundRequestId);
 
-    expect(getInbox(db, otherAdmin.id)).toEqual(before);
     expect(before.unreadCount).toBe(1);
+    expect(getInbox(db, otherAdmin.id)).toEqual(before);
   });
 });
 

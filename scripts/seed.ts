@@ -2900,6 +2900,18 @@ This course is still in draft while the cluster examples are rewritten against t
       })
       .run();
 
+    // Alex saw it raised, then decided it.
+    db.insert(schema.notifications)
+      .values({
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${r.buyer.name} raised a Refund Request for ${r.course.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(r.requestedDaysAgo),
+        readAt: daysAgo(r.decidedDaysAgo),
+      })
+      .run();
+
     db.insert(schema.notifications)
       .values({
         recipientId: r.buyer.id,
@@ -2915,6 +2927,32 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(
     `Created ${declinedRefundRequests.length} declined Refund Requests with their Notifications.`
   );
+
+  // ─── Refund Request raised Notifications ───
+  // Alex has seen Liam's, not Marta's. Headlines match what
+  // notifyRefundRequestRaised writes.
+
+  const marta = studentByEmail("marta.novak@student.dev");
+  db.insert(schema.notifications)
+    .values([
+      {
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${liam.name} raised a Refund Request for ${course1.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(4),
+        readAt: daysAgo(3),
+      },
+      {
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${marta.name} raised a Refund Request for ${course3.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(1),
+        readAt: null,
+      },
+    ])
+    .run();
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
