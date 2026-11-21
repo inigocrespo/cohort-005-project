@@ -520,3 +520,140 @@ describe("New Question", () => {
     );
   });
 });
+
+describe("Reply", () => {
+  let lesson: typeof schema.lessons.$inferSelect;
+  let ana: typeof schema.users.$inferSelect;
+  let question: typeof schema.comments.$inferSelect;
+
+  beforeEach(() => {
+    const mod = db
+      .insert(schema.modules)
+      .values({ courseId: base.course.id, title: "Basics", position: 1 })
+      .returning()
+      .get();
+    lesson = db
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: "Lesson 3: Loops", position: 1 })
+      .returning()
+      .get();
+    ana = addPerson("Ana");
+    question = post(ana.id, null, "How do I break out early?");
+  });
+
+  function post(userId: number, parentId: number | null, body = "Use break.") {
+    const comment = db
+      .insert(schema.comments)
+      .values({ userId, lessonId: lesson.id, parentId, body })
+      .returning()
+      .get();
+    notifyCommentPosted(db, comment.id);
+    return comment;
+  }
+
+  it("gives the Question's author one unread Notification linking to the reply on its lesson page, naming the replier and the lesson", () => {
+    const ben = addPerson("Ben");
+
+    const reply = post(ben.id, question.id);
+
+    const inbox = getInbox(db, ana.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.Reply,
+        headline: "Ben replied to your comment on Lesson 3: Loops",
+        link: `/courses/test-course/lessons/${lesson.id}#comment-${reply.id}`,
+        isRead: false,
+      }),
+    ]);
+  });
+
+  it("tells only the Question's author, not others who replied to it, nor the Instructor", () => {
+    const ben = addPerson("Ben");
+    const cara = addPerson("Cara");
+
+    post(ben.id, question.id);
+    post(cara.id, question.id);
+
+    expect(
+      getInbox(db, ana.id).notifications.map((n) => n.headline).sort()
+    ).toEqual([
+      "Ben replied to your comment on Lesson 3: Loops",
+      "Cara replied to your comment on Lesson 3: Loops",
+    ]);
+    expect(getInbox(db, ben.id).notifications).toEqual([]);
+    expect(getInbox(db, cara.id).notifications).toEqual([]);
+    expect(
+      getInbox(db, base.instructor.id).notifications.map((n) => n.kind)
+    ).toEqual([NotificationKind.NewQuestion]);
+  });
+
+  it("tells the Question's author when the Instructor or a Platform Admin answers it, as from the Instructor Questions page", () => {
+    const ada = addPerson("Ada");
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, ada.id))
+      .run();
+
+    post(base.instructor.id, question.id);
+    post(ada.id, question.id);
+
+    expect(
+      getInbox(db, ana.id).notifications.map((n) => n.headline).sort()
+    ).toEqual([
+      "Ada replied to your comment on Lesson 3: Loops",
+      "Test Instructor replied to your comment on Lesson 3: Loops",
+    ]);
+    expect(getInbox(db, ada.id).notifications).toEqual([]);
+  });
+
+  it("tells the Instructor when someone replies to their own top-level comment", () => {
+    const announcement = post(base.instructor.id, null, "Heads up!");
+
+    const reply = post(ana.id, announcement.id);
+
+    expect(getInbox(db, base.instructor.id).notifications).toContainEqual(
+      expect.objectContaining({
+        kind: NotificationKind.Reply,
+        headline: "Ana replied to your comment on Lesson 3: Loops",
+        link: `/courses/test-course/lessons/${lesson.id}#comment-${reply.id}`,
+      })
+    );
+  });
+
+  it("gives the Question's author nothing when they reply to their own Question", () => {
+    post(ana.id, question.id);
+
+    expect(getInbox(db, ana.id).notifications).toEqual([]);
+  });
+
+  it("never quotes the reply or the Question in the headline", () => {
+    post(addPerson("Ben").id, question.id, "SECRET-REPLY-TEXT");
+
+    const [notification] = getInbox(db, ana.id).notifications;
+    expect(notification.headline).not.toContain("SECRET-REPLY-TEXT");
+    expect(notification.headline).not.toContain("break out early");
+  });
+
+  it("keeps its headline and link after the reply or the Question is edited or soft-deleted", () => {
+    const reply = post(addPerson("Ben").id, question.id);
+    const expected = expect.objectContaining({
+      headline: "Ben replied to your comment on Lesson 3: Loops",
+      link: `/courses/test-course/lessons/${lesson.id}#comment-${reply.id}`,
+    });
+
+    for (const comment of [reply, question]) {
+      db.update(schema.comments)
+        .set({ body: "Edited", editedAt: NOW.toISOString() })
+        .where(eq(schema.comments.id, comment.id))
+        .run();
+      expect(getInbox(db, ana.id).notifications).toEqual([expected]);
+
+      db.update(schema.comments)
+        .set({ deletedAt: NOW.toISOString() })
+        .where(eq(schema.comments.id, comment.id))
+        .run();
+      expect(getInbox(db, ana.id).notifications).toEqual([expected]);
+    }
+  });
+});

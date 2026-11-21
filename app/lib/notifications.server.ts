@@ -14,6 +14,7 @@ import {
   NotificationKind,
   UserRole,
 } from "~/db/schema";
+import { commentAnchor } from "~/lib/comments";
 
 // ─── Notifications ───
 // The only code that reads or writes Notifications. See GLOSSARY.md.
@@ -118,6 +119,8 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
 /**
  * A comment has just been posted on a lesson. Works out what kind it is from
  * the comment itself:
+ * - A reply tells the author of the top-level comment it replies to, unless
+ *   they wrote the reply. Links to the reply itself on its lesson page.
  * - A Question (a top-level comment by a Student) tells the course's
  *   Instructor, unless they wrote it.
  * - A top-level comment by an Instructor or a Platform Admin isn't a Question
@@ -126,11 +129,14 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
 export function notifyCommentPosted(db: Queryable, commentId: number): void {
   const comment = db
     .select({
+      id: comments.id,
       parentId: comments.parentId,
       authorId: comments.userId,
       authorName: users.name,
       authorRole: users.role,
+      lessonId: comments.lessonId,
       lessonTitle: lessons.title,
+      courseSlug: courses.slug,
       instructorId: courses.instructorId,
     })
     .from(comments)
@@ -143,6 +149,40 @@ export function notifyCommentPosted(db: Queryable, commentId: number): void {
 
   if (!comment) return;
   if (comment.parentId === null) notifyNewQuestion(db, comment);
+  else notifyReply(db, { ...comment, parentId: comment.parentId });
+}
+
+function notifyReply(
+  db: Queryable,
+  reply: {
+    id: number;
+    parentId: number;
+    authorId: number;
+    authorName: string;
+    lessonId: number;
+    lessonTitle: string;
+    courseSlug: string;
+  }
+): void {
+  // Replies are one level deep, so the parent is the top-level comment.
+  const parent = db
+    .select({ authorId: comments.userId })
+    .from(comments)
+    .where(eq(comments.id, reply.parentId))
+    .get();
+
+  if (!parent) return;
+  // Nobody is told about their own action.
+  if (parent.authorId === reply.authorId) return;
+
+  db.insert(notifications)
+    .values({
+      recipientId: parent.authorId,
+      kind: NotificationKind.Reply,
+      headline: `${reply.authorName} replied to your comment on ${reply.lessonTitle}`,
+      link: `/courses/${reply.courseSlug}/lessons/${reply.lessonId}#${commentAnchor(reply.id)}`,
+    })
+    .run();
 }
 
 function notifyNewQuestion(
