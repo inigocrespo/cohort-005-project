@@ -128,3 +128,53 @@ export function getInbox(db: Queryable, userId: number): Inbox {
     badgeLabel: toBadgeLabel(unreadCount),
   };
 }
+
+// ─── Read state ───
+// Each change is scoped to the given person: asking to change someone else's
+// Notification changes nothing. Only Notifications are touched, never the
+// work queues they point at.
+
+/** Marks one of the person's Notifications read. */
+export function markRead(
+  db: Queryable,
+  userId: number,
+  notificationId: number
+): void {
+  db.update(notifications)
+    .set({ readAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        eq(notifications.recipientId, userId),
+        isNull(notifications.readAt)
+      )
+    )
+    .run();
+}
+
+/** Marks one of the person's Notifications unread, to come back to later. */
+export function markUnread(
+  db: Queryable,
+  userId: number,
+  notificationId: number
+): void {
+  db.update(notifications)
+    .set({ readAt: null })
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        eq(notifications.recipientId, userId)
+      )
+    )
+    .run();
+}
+
+/** Marks every unread Notification of the person's read, not just the newest. */
+export function markAllRead(db: Queryable, userId: number): void {
+  db.update(notifications)
+    .set({ readAt: new Date().toISOString() })
+    .where(
+      and(eq(notifications.recipientId, userId), isNull(notifications.readAt))
+    )
+    .run();
+}

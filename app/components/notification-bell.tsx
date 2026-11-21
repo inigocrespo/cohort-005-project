@@ -1,8 +1,10 @@
 import { useState, type ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { useFetcher, useNavigate } from "react-router";
 import {
   Armchair,
   Bell,
+  Check,
+  CircleDot,
   MessageCircle,
   MessageSquareReply,
   Receipt,
@@ -19,6 +21,10 @@ const KIND_ICONS: Record<NotificationKind, ReactNode> = {
   [NotificationKind.SeatClaimed]: <Armchair className="size-4" />,
 };
 
+// Every read-state change goes through this one action route. Its submissions
+// revalidate the layout loader, so the badge follows along.
+const NOTIFICATIONS_ACTION = "/api/notifications";
+
 /**
  * The bell in the sidebar header and its dropdown of the person's newest
  * Notifications. The inbox comes from the app layout loader, so it refreshes
@@ -27,9 +33,18 @@ const KIND_ICONS: Record<NotificationKind, ReactNode> = {
 export function NotificationBell({ inbox }: { inbox: Inbox }) {
   const [isOpen, setIsOpen] = useState(false);
   const navigate = useNavigate();
+  const markReadFetcher = useFetcher();
 
-  function open(notification: InboxNotification) {
+  // Marks it read, then follows its stored link. The destination page does
+  // its own checks on the subject; the bell does none.
+  async function open(notification: InboxNotification) {
     setIsOpen(false);
+    if (!notification.isRead) {
+      await markReadFetcher.submit(
+        { intent: "mark-read", notificationId: notification.id },
+        { method: "post", action: NOTIFICATIONS_ACTION }
+      );
+    }
     navigate(notification.link);
   }
 
@@ -58,8 +73,9 @@ export function NotificationBell({ inbox }: { inbox: Inbox }) {
             onClick={() => setIsOpen(false)}
           />
           <div className="fixed left-[13.5rem] top-2 z-40 flex max-h-[28rem] w-96 flex-col rounded-lg border bg-popover text-popover-foreground shadow-xl">
-            <div className="border-b px-4 py-2.5">
+            <div className="flex items-center justify-between border-b px-4 py-2.5">
               <span className="text-sm font-semibold">Notifications</span>
+              <MarkAllRead disabled={inbox.unreadCount === 0} />
             </div>
             <div className="overflow-y-auto">
               {inbox.notifications.length === 0 && (
@@ -69,12 +85,19 @@ export function NotificationBell({ inbox }: { inbox: Inbox }) {
                 </div>
               )}
               {inbox.notifications.map((notification) => (
-                <button
+                <div
                   key={notification.id}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => open(notification)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      open(notification);
+                    }
+                  }}
                   className={cn(
-                    "flex w-full items-start gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/60",
+                    "flex w-full cursor-pointer items-start gap-3 border-b px-4 py-3 text-left last:border-b-0 hover:bg-accent/60",
                     !notification.isRead && "bg-primary/5"
                   )}
                 >
@@ -92,12 +115,67 @@ export function NotificationBell({ inbox }: { inbox: Inbox }) {
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {formatRelativeTime(notification.createdAt)}
                   </span>
-                </button>
+                  <ReadToggle notification={notification} />
+                </div>
               ))}
             </div>
           </div>
         </>
       )}
     </>
+  );
+}
+
+/** Flips one Notification read or unread without leaving the page. */
+function ReadToggle({ notification }: { notification: InboxNotification }) {
+  const fetcher = useFetcher();
+  const label = notification.isRead ? "Mark as unread" : "Mark as read";
+
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={(event) => {
+        // The row itself opens the Notification; the toggle mustn't.
+        event.stopPropagation();
+        fetcher.submit(
+          {
+            intent: notification.isRead ? "mark-unread" : "mark-read",
+            notificationId: notification.id,
+          },
+          { method: "post", action: NOTIFICATIONS_ACTION }
+        );
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+    >
+      {notification.isRead ? (
+        <CircleDot className="size-3.5 opacity-40" />
+      ) : (
+        <Check className="size-3.5" />
+      )}
+    </button>
+  );
+}
+
+/** Marks every one of the person's Notifications read, not just those listed. */
+function MarkAllRead({ disabled }: { disabled: boolean }) {
+  const fetcher = useFetcher();
+
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() =>
+        fetcher.submit(
+          { intent: "mark-all-read" },
+          { method: "post", action: NOTIFICATIONS_ACTION }
+        )
+      }
+      className="text-xs font-medium text-primary hover:underline disabled:text-muted-foreground disabled:no-underline"
+    >
+      Mark all read
+    </button>
   );
 }
