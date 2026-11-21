@@ -6,8 +6,10 @@ import {
   courses,
   notifications,
   purchases,
+  refunds,
   users,
   NotificationKind,
+  RefundStatus,
 } from "~/db/schema";
 
 // ─── Notifications ───
@@ -64,6 +66,50 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
       kind: NotificationKind.SeatClaimed,
       headline: `${student.name} claimed a Seat on ${seat.courseTitle}`,
       link: "/team",
+    })
+    .run();
+}
+
+/**
+ * A Platform Admin has just approved or declined a Refund Request. Tells the
+ * buyer which, unless they decided it themselves. Students on the Claimed
+ * Seats of a Team Licence are not told: they didn't make the Purchase.
+ */
+export function notifyRefundRequestDecided(
+  db: Queryable,
+  refundRequestId: number
+): void {
+  const refundRequest = db
+    .select({
+      status: refunds.status,
+      deciderId: refunds.resolvedByUserId,
+      purchaseId: purchases.id,
+      buyerId: purchases.userId,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!refundRequest || refundRequest.status === RefundStatus.Open) return;
+  // Nobody is told about their own action.
+  if (refundRequest.deciderId === refundRequest.buyerId) return;
+
+  // A Team Licence is the Purchase that granted Seats (see refunds.server).
+  const grantedSeat = db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, refundRequest.purchaseId))
+    .get();
+
+  db.insert(notifications)
+    .values({
+      recipientId: refundRequest.buyerId,
+      kind: NotificationKind.RefundRequestDecided,
+      headline: `Your refund request for ${refundRequest.courseTitle} was ${refundRequest.status}`,
+      link: grantedSeat ? "/team" : "/settings",
     })
     .run();
 }
