@@ -37,6 +37,14 @@ export enum RefundStatus {
   Declined = "declined",
 }
 
+export enum NotificationKind {
+  RefundRequestRaised = "refund_request_raised",
+  RefundRequestDecided = "refund_request_decided",
+  Reply = "reply",
+  NewQuestion = "new_question",
+  SeatClaimed = "seat_claimed",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -374,3 +382,32 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// A short headline, written once when the event happens, telling one person
+// that something relevant to them happened. Deliberately holds no foreign key
+// to its subject (comment, Refund Request, Seat): a Notification outlives
+// changes to it, and nothing reads the subject back.
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    recipientId: integer("recipient_id")
+      .notNull()
+      .references(() => users.id),
+    kind: text("kind").notNull().$type<NotificationKind>(),
+    // Plain text. Never a comment body, Refund Request reason or decision note.
+    headline: text("headline").notNull(),
+    link: text("link").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    // Null means unread.
+    readAt: text("read_at"),
+  },
+  (table) => [
+    index("notifications_recipient_created_idx").on(
+      table.recipientId,
+      table.createdAt
+    ),
+  ]
+);

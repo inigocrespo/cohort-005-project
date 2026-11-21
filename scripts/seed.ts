@@ -13,6 +13,7 @@ import {
   RefundStatus,
   QuestionType,
   TeamMemberRole,
+  NotificationKind,
 } from "../app/db/schema";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS notifications;
     DROP TABLE IF EXISTS comments;
     DROP TABLE IF EXISTS course_ratings;
     DROP TABLE IF EXISTS video_watch_events;
@@ -2353,6 +2355,24 @@ This course is still in draft while the cluster examples are rewritten against t
     .where(eq(schema.coupons.id, seededCoupons[1].id))
     .run();
 
+  // Bossy's Seat claimed Notifications: she has seen Olivia's, not Liam's.
+  // Headlines match what notifySeatClaimed writes.
+  db.insert(schema.notifications)
+    .values(
+      [
+        { email: "olivia.martinez@student.dev", at: 30, readAt: daysAgo(29) },
+        { email: "liam@example.com", at: 25, readAt: null },
+      ].map(({ email, at, readAt }) => ({
+        recipientId: bossy.id,
+        kind: NotificationKind.SeatClaimed,
+        headline: `${studentByEmail(email).name} claimed a Seat on ${course2.title}`,
+        link: "/team",
+        createdAt: daysAgo(at),
+        readAt,
+      }))
+    )
+    .run();
+
   console.log(
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed, ${countRows(schema.coupons, isNull(schema.coupons.redeemedByUserId))} available).`
   );
@@ -2692,6 +2712,19 @@ This course is still in draft while the cluster examples are rewritten against t
           enrolledAt: daysAgo(redeemedDaysAgo),
         })
         .run();
+
+      // The Team Admin has read all but the two newest claims.
+      const isUnread = i >= redeemerEmails.length - 2;
+      db.insert(schema.notifications)
+        .values({
+          recipientId: teamAdmin.id,
+          kind: NotificationKind.SeatClaimed,
+          headline: `${redeemer.name} claimed a Seat on ${course.title}`,
+          link: "/team",
+          createdAt: daysAgo(redeemedDaysAgo),
+          readAt: isUnread ? null : daysAgo(redeemedDaysAgo),
+        })
+        .run();
     });
 
     return { team, purchase, coupons: teamCoupons };
@@ -2851,6 +2884,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
+  );
+  console.log(
+    `  Notifications: ${countRows(schema.notifications)} (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread)`
   );
 }
 
