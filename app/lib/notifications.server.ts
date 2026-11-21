@@ -2,12 +2,16 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
+  comments,
   coupons,
   courses,
+  lessons,
+  modules,
   notifications,
   purchases,
   users,
   NotificationKind,
+  UserRole,
 } from "~/db/schema";
 
 // ─── Notifications ───
@@ -64,6 +68,61 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
       kind: NotificationKind.SeatClaimed,
       headline: `${student.name} claimed a Seat on ${seat.courseTitle}`,
       link: "/team",
+    })
+    .run();
+}
+
+/**
+ * A comment has just been posted on a lesson. Works out what kind it is from
+ * the comment itself:
+ * - A Question (a top-level comment by a Student) tells the course's
+ *   Instructor, unless they wrote it.
+ * - A top-level comment by an Instructor or a Platform Admin isn't a Question
+ *   and tells nobody.
+ */
+export function notifyCommentPosted(db: Queryable, commentId: number): void {
+  const comment = db
+    .select({
+      parentId: comments.parentId,
+      authorId: comments.userId,
+      authorName: users.name,
+      authorRole: users.role,
+      lessonTitle: lessons.title,
+      instructorId: courses.instructorId,
+    })
+    .from(comments)
+    .innerJoin(users, eq(comments.userId, users.id))
+    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(eq(comments.id, commentId))
+    .get();
+
+  if (!comment) return;
+  if (comment.parentId === null) notifyNewQuestion(db, comment);
+}
+
+function notifyNewQuestion(
+  db: Queryable,
+  question: {
+    authorId: number;
+    authorName: string;
+    authorRole: UserRole;
+    lessonTitle: string;
+    instructorId: number;
+  }
+): void {
+  // Only a Student's top-level comment is a Question.
+  if (question.authorRole !== UserRole.Student) return;
+  // Nobody is told about their own action.
+  if (question.authorId === question.instructorId) return;
+
+  db.insert(notifications)
+    .values({
+      recipientId: question.instructorId,
+      kind: NotificationKind.NewQuestion,
+      headline: `${question.authorName} asked a Question on ${question.lessonTitle}`,
+      link: "/instructor/questions",
     })
     .run();
 }
