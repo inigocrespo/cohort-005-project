@@ -1899,7 +1899,7 @@ This course is still in draft while the cluster examples are rewritten against t
   });
 
   // Waiting, and stale enough to flag amber in the queue.
-  comment({
+  const c1q2 = comment({
     lessonId: course1LessonIds[7],
     userId: students[2].id,
     body: "Why does this fail to infer? I expected `T` to come out as `string`.\n\n```typescript\nfunction first<T>(items: T[]): T {\n  return items[0];\n}\n\nconst x = first([]);\n```",
@@ -1907,7 +1907,7 @@ This course is still in draft while the cluster examples are rewritten against t
   });
 
   // Waiting, but posted today — should look calm in the queue.
-  comment({
+  const c1q3 = comment({
     lessonId: course1LessonIds[4],
     userId: students[4].id,
     body: "Is there a reason to prefer `interface` over `type` here, or is it purely style?",
@@ -1995,6 +1995,40 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(
     `Created ${countRows(schema.comments)} lesson comments across ${countRows(schema.comments, isNull(schema.comments.parentId))} threads.`
   );
+
+  // Sarah's New Question Notifications: she has seen the ones she answered,
+  // not the two still waiting. Headlines match what notifyCommentPosted writes.
+  function newQuestionHeadline(question: typeof schema.comments.$inferSelect) {
+    const author = db
+      .select({ name: schema.users.name })
+      .from(schema.users)
+      .where(eq(schema.users.id, question.userId))
+      .get()!;
+    const lesson = db
+      .select({ title: schema.lessons.title })
+      .from(schema.lessons)
+      .where(eq(schema.lessons.id, question.lessonId))
+      .get()!;
+    return `${author.name} asked a Question on ${lesson.title}`;
+  }
+
+  db.insert(schema.notifications)
+    .values(
+      [
+        { question: c1q5, readAt: daysAgo(39) },
+        { question: c1q1, readAt: daysAgo(29) },
+        { question: c1q2, readAt: null },
+        { question: c1q3, readAt: null },
+      ].map(({ question, readAt }) => ({
+        recipientId: instructor1.id,
+        kind: NotificationKind.NewQuestion,
+        headline: newQuestionHeadline(question),
+        link: "/instructor/questions",
+        createdAt: question.createdAt,
+        readAt,
+      }))
+    )
+    .run();
 
   // ─── Lesson Progress ───
 
@@ -2830,6 +2864,32 @@ This course is still in draft while the cluster examples are rewritten against t
     .run();
 
   console.log("Created Marta's Refund Request on her Team Licence.");
+
+  // ─── Refund Request raised Notifications ───
+  // Alex has seen Liam's, not Marta's. Headlines match what
+  // notifyRefundRequestRaised writes.
+
+  const marta = studentByEmail("marta.novak@student.dev");
+  db.insert(schema.notifications)
+    .values([
+      {
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${liam.name} raised a Refund Request for ${course1.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(4),
+        readAt: daysAgo(3),
+      },
+      {
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${marta.name} raised a Refund Request for ${course3.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(1),
+        readAt: null,
+      },
+    ])
+    .run();
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one

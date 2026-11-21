@@ -1,13 +1,18 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
+  comments,
   coupons,
   courses,
+  lessons,
+  modules,
   notifications,
   purchases,
+  refunds,
   users,
   NotificationKind,
+  UserRole,
 } from "~/db/schema";
 
 // ─── Notifications ───
@@ -28,6 +33,48 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Queryable = Db | Tx;
 
 // ─── Event recorders ───
+
+/**
+ * A buyer has just raised a Refund Request. Tells every user who is a Platform
+ * Admin right now, except the buyer. The headline never quotes the reason.
+ */
+export function notifyRefundRequestRaised(
+  db: Queryable,
+  refundRequestId: number
+): void {
+  const raised = db
+    .select({
+      buyerId: users.id,
+      buyerName: users.name,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!raised) return;
+
+  // Nobody is told about their own action.
+  const platformAdmins = db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, UserRole.Admin), ne(users.id, raised.buyerId)))
+    .all();
+
+  for (const admin of platformAdmins) {
+    db.insert(notifications)
+      .values({
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${raised.buyerName} raised a Refund Request for ${raised.courseTitle}`,
+        link: "/admin/refunds",
+      })
+      .run();
+  }
+}
 
 /**
  * A Student has just claimed a Seat. Tells the Team Admin who bought its Team
@@ -64,6 +111,61 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
       kind: NotificationKind.SeatClaimed,
       headline: `${student.name} claimed a Seat on ${seat.courseTitle}`,
       link: "/team",
+    })
+    .run();
+}
+
+/**
+ * A comment has just been posted on a lesson. Works out what kind it is from
+ * the comment itself:
+ * - A Question (a top-level comment by a Student) tells the course's
+ *   Instructor, unless they wrote it.
+ * - A top-level comment by an Instructor or a Platform Admin isn't a Question
+ *   and tells nobody.
+ */
+export function notifyCommentPosted(db: Queryable, commentId: number): void {
+  const comment = db
+    .select({
+      parentId: comments.parentId,
+      authorId: comments.userId,
+      authorName: users.name,
+      authorRole: users.role,
+      lessonTitle: lessons.title,
+      instructorId: courses.instructorId,
+    })
+    .from(comments)
+    .innerJoin(users, eq(comments.userId, users.id))
+    .innerJoin(lessons, eq(comments.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .innerJoin(courses, eq(modules.courseId, courses.id))
+    .where(eq(comments.id, commentId))
+    .get();
+
+  if (!comment) return;
+  if (comment.parentId === null) notifyNewQuestion(db, comment);
+}
+
+function notifyNewQuestion(
+  db: Queryable,
+  question: {
+    authorId: number;
+    authorName: string;
+    authorRole: UserRole;
+    lessonTitle: string;
+    instructorId: number;
+  }
+): void {
+  // Only a Student's top-level comment is a Question.
+  if (question.authorRole !== UserRole.Student) return;
+  // Nobody is told about their own action.
+  if (question.authorId === question.instructorId) return;
+
+  db.insert(notifications)
+    .values({
+      recipientId: question.instructorId,
+      kind: NotificationKind.NewQuestion,
+      headline: `${question.authorName} asked a Question on ${question.lessonTitle}`,
+      link: "/instructor/questions",
     })
     .run();
 }
