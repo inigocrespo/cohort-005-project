@@ -15,6 +15,7 @@ import {
   TeamMemberRole,
   NotificationKind,
 } from "../app/db/schema";
+import { commentAnchor } from "../app/lib/comments";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1883,7 +1884,7 @@ This course is still in draft while the cluster examples are rewritten against t
     body: "I'm getting `tsc: command not found` when I run the compile step. Did I miss an install somewhere?",
     createdAt: daysAgo(30),
   });
-  comment({
+  const c1q1Answer = comment({
     lessonId: course1LessonIds[2],
     userId: instructor1.id,
     parentId: c1q1.id,
@@ -1921,7 +1922,7 @@ This course is still in draft while the cluster examples are rewritten against t
     body: "Does strict mode change anything about how this example behaves?",
     createdAt: daysAgo(4),
   });
-  comment({
+  const c1q4Reply = comment({
     lessonId: course1LessonIds[3],
     userId: students[0].id,
     parentId: c1q4.id,
@@ -1937,7 +1938,7 @@ This course is still in draft while the cluster examples are rewritten against t
     createdAt: daysAgo(40),
     editedAt: daysAgo(39),
   });
-  comment({
+  const c1q5Answer = comment({
     lessonId: course1LessonIds[0],
     userId: instructor1.id,
     parentId: c1q5.id,
@@ -1953,7 +1954,7 @@ This course is still in draft while the cluster examples are rewritten against t
     createdAt: daysAgo(12),
     deletedAt: daysAgo(12),
   });
-  comment({
+  const c1q6Answer = comment({
     lessonId: course1LessonIds[1],
     userId: instructor1.id,
     parentId: c1q6.id,
@@ -1976,7 +1977,7 @@ This course is still in draft while the cluster examples are rewritten against t
     body: "Are the example requests in this lesson hitting a real API, or is it all mocked?",
     createdAt: daysAgo(14),
   });
-  comment({
+  const c2q2Answer = comment({
     lessonId: course2LessonIds[0],
     userId: admin.id,
     parentId: c2q2.id,
@@ -2028,6 +2029,51 @@ This course is still in draft while the cluster examples are rewritten against t
         readAt,
       }))
     )
+    .run();
+
+  // Reply Notifications: each Question's author hears about replies by anyone
+  // else (Emma's own follow-up on c1q1 tells nobody). James has seen Sarah's
+  // answer but not Emma's reply; Sophia's links to a reply under her deleted
+  // Question. Headlines and links match what notifyCommentPosted writes.
+  function replyNotification(
+    reply: typeof schema.comments.$inferSelect,
+    readAt: string | null
+  ) {
+    const question = db
+      .select({ authorId: schema.comments.userId })
+      .from(schema.comments)
+      .where(eq(schema.comments.id, reply.parentId!))
+      .get()!;
+    const replier = db
+      .select({ name: schema.users.name })
+      .from(schema.users)
+      .where(eq(schema.users.id, reply.userId))
+      .get()!;
+    const lesson = db
+      .select({ title: schema.lessons.title, courseSlug: schema.courses.slug })
+      .from(schema.lessons)
+      .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+      .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+      .where(eq(schema.lessons.id, reply.lessonId))
+      .get()!;
+    return {
+      recipientId: question.authorId,
+      kind: NotificationKind.Reply,
+      headline: `${replier.name} replied to your comment on ${lesson.title}`,
+      link: `/courses/${lesson.courseSlug}/lessons/${reply.lessonId}#${commentAnchor(reply.id)}`,
+      createdAt: reply.createdAt,
+      readAt,
+    };
+  }
+
+  db.insert(schema.notifications)
+    .values([
+      replyNotification(c1q1Answer, daysAgo(29)),
+      replyNotification(c1q5Answer, daysAgo(39)),
+      replyNotification(c1q4Reply, null),
+      replyNotification(c1q6Answer, null),
+      replyNotification(c2q2Answer, daysAgo(12)),
+    ])
     .run();
 
   // ─── Lesson Progress ───
