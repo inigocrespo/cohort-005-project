@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useFetcher } from "react-router";
+import { useFetcher, useLocation } from "react-router";
 import { toast } from "sonner";
 import { MessageSquare, Pencil, Reply, Trash2 } from "lucide-react";
 import { Button } from "~/components/ui/button";
@@ -7,7 +7,13 @@ import { Card, CardContent } from "~/components/ui/card";
 import { Textarea } from "~/components/ui/textarea";
 import { UserAvatar } from "~/components/user-avatar";
 import { cn, formatRelativeTime } from "~/lib/utils";
-import { MAX_COMMENT_LENGTH } from "~/lib/comments";
+import {
+  MAX_COMMENT_LENGTH,
+  commentAnchor,
+  commentIdFromHash,
+} from "~/lib/comments";
+
+const HIGHLIGHT_MS = 2500;
 
 // Bodies arrive pre-rendered from the server (renderComment), because comments
 // are untrusted markdown and the sanitising renderer is server-only.
@@ -196,21 +202,28 @@ function CommentItem({
   canModerate,
   canPost,
   isReply,
+  highlightedId,
 }: {
   comment: RenderedComment;
   currentUserId: number | null;
   canModerate: boolean;
   canPost: boolean;
   isReply: boolean;
+  highlightedId: number | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [replying, setReplying] = useState(false);
 
   const isAuthor = currentUserId !== null && comment.author.id === currentUserId;
+  const anchorId = commentAnchor(comment.id);
+  const anchorClassName = cn(
+    "scroll-mt-24 rounded-md py-3 transition-colors duration-700",
+    comment.id === highlightedId && "bg-primary/10"
+  );
 
   if (comment.deleted) {
     return (
-      <div className="py-3">
+      <div id={anchorId} className={anchorClassName}>
         <p className="text-sm italic text-muted-foreground">
           This comment was deleted.
         </p>
@@ -219,13 +232,14 @@ function CommentItem({
           currentUserId={currentUserId}
           canModerate={canModerate}
           canPost={canPost}
+          highlightedId={highlightedId}
         />
       </div>
     );
   }
 
   return (
-    <div className={cn("py-3", isReply && "border-l pl-4")}>
+    <div id={anchorId} className={cn(anchorClassName, isReply && "border-l pl-4")}>
       <div className="flex items-start gap-3">
         <UserAvatar
           name={comment.author.name}
@@ -304,6 +318,7 @@ function CommentItem({
         currentUserId={currentUserId}
         canModerate={canModerate}
         canPost={canPost}
+        highlightedId={highlightedId}
       />
     </div>
   );
@@ -314,11 +329,13 @@ function Replies({
   currentUserId,
   canModerate,
   canPost,
+  highlightedId,
 }: {
   comment: RenderedComment;
   currentUserId: number | null;
   canModerate: boolean;
   canPost: boolean;
+  highlightedId: number | null;
 }) {
   if (comment.replies.length === 0) return null;
 
@@ -332,10 +349,36 @@ function Replies({
           canModerate={canModerate}
           canPost={canPost}
           isReply
+          highlightedId={highlightedId}
         />
       ))}
     </div>
   );
+}
+
+/**
+ * When the URL hash names a rendered comment (`#comment-42`), scrolls it into
+ * view and returns its id for a brief highlight. A hash naming a comment that
+ * isn't on the page (deleted, or the thread is hidden) does nothing.
+ */
+function useHighlightedComment(): number | null {
+  const { hash } = useLocation();
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
+
+  useEffect(() => {
+    const targetId = commentIdFromHash(hash);
+    if (targetId === null) return;
+
+    const element = document.getElementById(commentAnchor(targetId));
+    if (!element) return;
+
+    element.scrollIntoView({ block: "center" });
+    setHighlightedId(targetId);
+    const timer = window.setTimeout(() => setHighlightedId(null), HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [hash]);
+
+  return highlightedId;
 }
 
 export function CommentThread({
@@ -352,6 +395,8 @@ export function CommentThread({
   canPost: boolean;
   instructorName: string;
 }) {
+  const highlightedId = useHighlightedComment();
+
   return (
     <Card className="mb-8">
       <CardContent className="p-6">
@@ -378,6 +423,7 @@ export function CommentThread({
                 canModerate={canModerate}
                 canPost={canPost}
                 isReply={false}
+                highlightedId={highlightedId}
               />
             ))}
           </div>
