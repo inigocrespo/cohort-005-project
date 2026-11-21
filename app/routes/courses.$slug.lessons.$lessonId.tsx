@@ -895,22 +895,33 @@ export async function action({ params, request }: Route.ActionArgs) {
   ) {
     const access = await requireContentAccess(request, course.id);
 
-    try {
-      if (intent === "create-comment") {
-        const parsed = parseFormData(formData, createCommentSchema);
-        if (!parsed.success) {
-          return { ok: false, error: "Enter a comment before posting." };
-        }
-        const comment = createComment(
+    if (intent === "create-comment") {
+      const parsed = parseFormData(formData, createCommentSchema);
+      if (!parsed.success) {
+        return { ok: false, error: "Enter a comment before posting." };
+      }
+      let comment: ReturnType<typeof createComment>;
+      try {
+        comment = createComment(
           currentUserId,
           lessonId,
           parsed.data.parentId ?? null,
           parsed.data.body
         );
-        notifyCommentPosted(db, comment.id);
-        return { ok: true };
+      } catch (error) {
+        // Service validation failures are user-correctable.
+        if (error instanceof Error) {
+          return { ok: false, error: error.message };
+        }
+        throw error;
       }
+      // Outside the try: the comment is saved, so nothing here may report it
+      // as failed.
+      notifyCommentPosted(db, comment.id);
+      return { ok: true };
+    }
 
+    try {
       if (intent === "edit-comment") {
         const parsed = parseFormData(formData, editCommentSchema);
         if (!parsed.success) {
