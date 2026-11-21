@@ -101,5 +101,5 @@ A Student's top-level comment on a lesson.
 ### Notifications
 
 **Notification**:
-A message inside Cadence telling one person that something relevant happened. Each recipient has their own read state.
+A message inside Cadence telling one person that something relevant happened. An event that concerns several people gives each of them their own Notification, with its own read state. The recipients are the people who hold the role when the event happens. What it says is fixed when it is sent and doesn't change if its subject later does.
 _Avoid_: Alert, Push
