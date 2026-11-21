@@ -12,6 +12,7 @@ import {
   refunds,
   users,
   NotificationKind,
+  RefundStatus,
   UserRole,
 } from "~/db/schema";
 import { commentAnchor } from "~/lib/comments";
@@ -112,6 +113,50 @@ export function notifySeatClaimed(db: Queryable, seatId: number): void {
       kind: NotificationKind.SeatClaimed,
       headline: `${student.name} claimed a Seat on ${seat.courseTitle}`,
       link: "/team",
+    })
+    .run();
+}
+
+/**
+ * A Platform Admin has just approved or declined a Refund Request. Tells the
+ * buyer which, unless they decided it themselves. Students on the Claimed
+ * Seats of a Team Licence are not told: they didn't make the Purchase.
+ */
+export function notifyRefundRequestDecided(
+  db: Queryable,
+  refundRequestId: number
+): void {
+  const refundRequest = db
+    .select({
+      status: refunds.status,
+      deciderId: refunds.resolvedByUserId,
+      purchaseId: purchases.id,
+      buyerId: purchases.userId,
+      courseTitle: courses.title,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!refundRequest || refundRequest.status === RefundStatus.Open) return;
+  // Nobody is told about their own action.
+  if (refundRequest.deciderId === refundRequest.buyerId) return;
+
+  // A Team Licence is the Purchase that granted Seats (see refunds.server).
+  const grantedSeat = db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, refundRequest.purchaseId))
+    .get();
+
+  db.insert(notifications)
+    .values({
+      recipientId: refundRequest.buyerId,
+      kind: NotificationKind.RefundRequestDecided,
+      headline: `Your refund request for ${refundRequest.courseTitle} was ${refundRequest.status}`,
+      link: grantedSeat ? "/team" : "/settings",
     })
     .run();
 }
@@ -269,4 +314,54 @@ export function getInbox(db: Queryable, userId: number): Inbox {
     unreadCount,
     badgeLabel: toBadgeLabel(unreadCount),
   };
+}
+
+// ─── Read state ───
+// Each change is scoped to the given person: asking to change someone else's
+// Notification changes nothing. Only Notifications are touched, never the
+// work queues they point at.
+
+/** Marks one of the person's Notifications read. */
+export function markRead(
+  db: Queryable,
+  userId: number,
+  notificationId: number
+): void {
+  db.update(notifications)
+    .set({ readAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        eq(notifications.recipientId, userId),
+        isNull(notifications.readAt)
+      )
+    )
+    .run();
+}
+
+/** Marks one of the person's Notifications unread, to come back to later. */
+export function markUnread(
+  db: Queryable,
+  userId: number,
+  notificationId: number
+): void {
+  db.update(notifications)
+    .set({ readAt: null })
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        eq(notifications.recipientId, userId)
+      )
+    )
+    .run();
+}
+
+/** Marks every unread Notification of the person's read, not just the newest. */
+export function markAllRead(db: Queryable, userId: number): void {
+  db.update(notifications)
+    .set({ readAt: new Date().toISOString() })
+    .where(
+      and(eq(notifications.recipientId, userId), isNull(notifications.readAt))
+    )
+    .run();
 }

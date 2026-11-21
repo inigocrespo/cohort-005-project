@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -2811,7 +2811,7 @@ This course is still in draft while the cluster examples are rewritten against t
   }
 
   // Eight seats on TypeScript, six redeemed.
-  createTeamPurchase(
+  const nakamuraLicence = createTeamPurchase(
     "ava.nakamura@student.dev",
     course1,
     8,
@@ -2910,6 +2910,103 @@ This course is still in draft while the cluster examples are rewritten against t
     .run();
 
   console.log("Created Marta's Refund Request on her Team Licence.");
+
+  // ─── Decided Refund Requests ───
+  // Declined ones, so nobody loses what they bought. Each buyer has the
+  // Refund Request decided Notification; headlines match what
+  // notifyRefundRequestDecided writes. Emma and Ava have read theirs, Sophia
+  // hasn't yet.
+
+  function individualPurchaseOf(email: string, course: typeof course1) {
+    const buyer = studentByEmail(email);
+    const purchase = db
+      .select()
+      .from(schema.purchases)
+      .where(
+        and(
+          eq(schema.purchases.userId, buyer.id),
+          eq(schema.purchases.courseId, course.id)
+        )
+      )
+      .get();
+    if (!purchase) throw new Error(`No purchase of ${course.title} by ${email}`);
+    return { buyer, purchase };
+  }
+
+  const declinedRefundRequests = [
+    {
+      ...individualPurchaseOf("emma.wilson@student.dev", course2),
+      course: course2,
+      link: "/settings",
+      reason: "I thought this covered React Native as well.",
+      note: "You have finished most of the course, so it is past what we refund.",
+      requestedDaysAgo: 35,
+      decidedDaysAgo: 34,
+      readDaysAgo: 33 as number | null,
+    },
+    {
+      ...individualPurchaseOf("sophia.davis@student.dev", course1),
+      course: course1,
+      link: "/settings",
+      reason: "Money is tight this month.",
+      note: "You have watched more than we can refund. Get in touch if that's wrong.",
+      requestedDaysAgo: 3,
+      decidedDaysAgo: 2,
+      readDaysAgo: null,
+    },
+    {
+      buyer: studentByEmail("ava.nakamura@student.dev"),
+      purchase: nakamuraLicence.purchase,
+      course: course1,
+      link: "/team",
+      reason: "We over-ordered seats.",
+      note: "Seats on this Team Licence have been claimed, so it can't be refunded.",
+      requestedDaysAgo: 110,
+      decidedDaysAgo: 109,
+      readDaysAgo: 109 as number | null,
+    },
+  ];
+
+  for (const r of declinedRefundRequests) {
+    db.insert(schema.refunds)
+      .values({
+        purchaseId: r.purchase.id,
+        status: RefundStatus.Declined,
+        reason: r.reason,
+        decisionNote: r.note,
+        requestedAt: daysAgo(r.requestedDaysAgo),
+        resolvedAt: daysAgo(r.decidedDaysAgo),
+        resolvedByUserId: admin.id,
+      })
+      .run();
+
+    // Alex saw it raised, then decided it.
+    db.insert(schema.notifications)
+      .values({
+        recipientId: admin.id,
+        kind: NotificationKind.RefundRequestRaised,
+        headline: `${r.buyer.name} raised a Refund Request for ${r.course.title}`,
+        link: "/admin/refunds",
+        createdAt: daysAgo(r.requestedDaysAgo),
+        readAt: daysAgo(r.decidedDaysAgo),
+      })
+      .run();
+
+    db.insert(schema.notifications)
+      .values({
+        recipientId: r.buyer.id,
+        kind: NotificationKind.RefundRequestDecided,
+        headline: `Your refund request for ${r.course.title} was declined`,
+        link: r.link,
+        createdAt: daysAgo(r.decidedDaysAgo),
+        readAt: r.readDaysAgo === null ? null : daysAgo(r.readDaysAgo),
+      })
+      .run();
+  }
+
+  console.log(
+    `Created ${declinedRefundRequests.length} declined Refund Requests with their Notifications.`
+  );
 
   // ─── Refund Request raised Notifications ───
   // Alex has seen Liam's, not Marta's. Headlines match what

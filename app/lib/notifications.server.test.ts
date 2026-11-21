@@ -2,14 +2,23 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
-import { NotificationKind, UserRole } from "~/db/schema";
+import { NotificationKind, RefundStatus, UserRole } from "~/db/schema";
 import {
   getInbox,
+  markAllRead,
+  markRead,
+  markUnread,
   notifyCommentPosted,
+  notifyRefundRequestDecided,
   notifyRefundRequestRaised,
   notifySeatClaimed,
 } from "./notifications.server";
-import { approveRefundRequest, raiseRefundRequest } from "./refunds.server";
+import {
+  approveRefundRequest,
+  declineRefundRequest,
+  listRefundRequestsForReview,
+  raiseRefundRequest,
+} from "./refunds.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -341,6 +350,229 @@ describe("Refund Request raised", () => {
   });
 });
 
+describe("Refund Request decided", () => {
+  let platformAdmin: typeof schema.users.$inferSelect;
+  let buyer: typeof schema.users.$inferSelect;
+
+  beforeEach(() => {
+    platformAdmin = addPerson("Pam");
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, platformAdmin.id))
+      .run();
+    buyer = addPerson("Bea");
+  });
+
+  function buyIndividually(userId: number) {
+    return db
+      .insert(schema.purchases)
+      .values({
+        userId,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: NOW.toISOString(),
+      })
+      .returning()
+      .get();
+  }
+
+  function raise(purchaseId: number) {
+    return db
+      .insert(schema.refunds)
+      .values({
+        purchaseId,
+        status: RefundStatus.Open,
+        reason: "Secret reason nobody else should read",
+        requestedAt: NOW.toISOString(),
+      })
+      .returning()
+      .get().id;
+  }
+
+  // As the approve and decline actions do: record only once the decision
+  // has succeeded.
+  function approve(refundRequestId: number, deciderId = platformAdmin.id) {
+    const result = approveRefundRequest(
+      db,
+      refundRequestId,
+      deciderId,
+      "Private approval note",
+      NOW
+    );
+    if (result.ok) notifyRefundRequestDecided(db, refundRequestId);
+    return result;
+  }
+
+  function decline(refundRequestId: number, deciderId = platformAdmin.id) {
+    const result = declineRefundRequest(
+      db,
+      refundRequestId,
+      deciderId,
+      "Private decline note",
+      NOW
+    );
+    if (result.ok) notifyRefundRequestDecided(db, refundRequestId);
+    return result;
+  }
+
+  it("gives the buyer of an Individual Purchase one unread Notification saying it was approved, linking to Settings", () => {
+    const refundRequestId = raise(buyIndividually(buyer.id).id);
+
+    approve(refundRequestId);
+
+    const inbox = getInbox(db, buyer.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.RefundRequestDecided,
+        headline: "Your refund request for Test Course was approved",
+        link: "/settings",
+        isRead: false,
+      }),
+    ]);
+  });
+
+  it("gives the buyer one unread Notification saying it was declined", () => {
+    const refundRequestId = raise(buyIndividually(buyer.id).id);
+
+    decline(refundRequestId);
+
+    const inbox = getInbox(db, buyer.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.RefundRequestDecided,
+        headline: "Your refund request for Test Course was declined",
+        link: "/settings",
+        isRead: false,
+      }),
+    ]);
+  });
+
+  it("gives the Team Admin of a Team Licence a Notification linking to the Team page", () => {
+    const [seat] = buySeats(teamAdmin.id, 2);
+    const refundRequestId = raise(seat.purchaseId!);
+
+    approve(refundRequestId);
+
+    expect(getInbox(db, teamAdmin.id).notifications).toEqual([
+      expect.objectContaining({
+        headline: "Your refund request for Test Course was approved",
+        link: "/team",
+      }),
+    ]);
+  });
+
+  it("tells nobody when the buyer is the Platform Admin deciding their own Refund Request", () => {
+    const refundRequestId = raise(buyIndividually(platformAdmin.id).id);
+
+    decline(refundRequestId, platformAdmin.id);
+
+    expect(getInbox(db, platformAdmin.id).unreadCount).toBe(0);
+  });
+
+  it("records nothing for a Refund Request that is still open", () => {
+    const refundRequestId = raise(buyIndividually(buyer.id).id);
+
+    notifyRefundRequestDecided(db, refundRequestId);
+
+    expect(getInbox(db, buyer.id).unreadCount).toBe(0);
+  });
+
+  it("tells no Student on a Claimed Seat of the Team Licence", () => {
+    const [seat] = buySeats(teamAdmin.id, 2);
+    const ana = addPerson("Ana");
+    claimSeat(seat.id, ana.id);
+    const refundRequestId = raise(seat.purchaseId!);
+
+    decline(refundRequestId);
+
+    expect(getInbox(db, ana.id).notifications).toEqual([]);
+    expect(
+      getInbox(db, teamAdmin.id).notifications.filter(
+        (n) => n.kind === NotificationKind.RefundRequestDecided
+      )
+    ).toHaveLength(1);
+  });
+
+  it("records nothing when an approval is refused because a Seat is claimed", () => {
+    const [seat] = buySeats(teamAdmin.id, 2);
+    claimSeat(seat.id, addPerson("Ana").id);
+    const refundRequestId = raise(seat.purchaseId!);
+
+    expect(approve(refundRequestId).ok).toBe(false);
+    notifyRefundRequestDecided(db, refundRequestId);
+
+    expect(
+      getInbox(db, teamAdmin.id).notifications.map((n) => n.kind)
+    ).not.toContain(NotificationKind.RefundRequestDecided);
+  });
+
+  it("records nothing more when a second Platform Admin tries to decide it again", () => {
+    const refundRequestId = raise(buyIndividually(buyer.id).id);
+    const secondAdmin = addPerson("Sam");
+
+    approve(refundRequestId);
+    expect(decline(refundRequestId, secondAdmin.id).ok).toBe(false);
+
+    expect(getInbox(db, buyer.id).notifications).toEqual([
+      expect.objectContaining({
+        headline: "Your refund request for Test Course was approved",
+      }),
+    ]);
+  });
+
+  it("never quotes the Refund Request reason or the decision note", () => {
+    approve(raise(buyIndividually(buyer.id).id));
+    decline(raise(buyIndividually(buyer.id).id));
+
+    const headlines = getInbox(db, buyer.id).notifications.map(
+      (n) => n.headline
+    );
+    expect(headlines).toHaveLength(2);
+    for (const headline of headlines) {
+      expect(headline).not.toContain("Secret reason");
+      expect(headline).not.toContain("Private");
+    }
+  });
+
+  it("keeps its headline after the course is renamed", () => {
+    approve(raise(buyIndividually(buyer.id).id));
+
+    db.update(schema.courses)
+      .set({ title: "Renamed Course" })
+      .where(eq(schema.courses.id, base.course.id))
+      .run();
+
+    expect(getInbox(db, buyer.id).notifications[0].headline).toBe(
+      "Your refund request for Test Course was approved"
+    );
+  });
+
+  it("leaves other Platform Admins' Refund Request raised Notifications as they were", () => {
+    const otherAdmin = addPerson("Otto");
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, otherAdmin.id))
+      .run();
+    const raised = raiseRefundRequest(
+      db,
+      buyIndividually(buyer.id).id,
+      buyer.id,
+      "Secret reason nobody else should read",
+      NOW
+    );
+    if (!raised.ok) throw new Error(raised.error);
+    notifyRefundRequestRaised(db, raised.refundRequestId);
+    const before = getInbox(db, otherAdmin.id);
+
+    approve(raised.refundRequestId);
+
+    expect(before.unreadCount).toBe(1);
+    expect(getInbox(db, otherAdmin.id)).toEqual(before);
+  });
+});
+
 describe("Inbox", () => {
   let studentCount = 0;
 
@@ -408,6 +640,136 @@ describe("Inbox", () => {
     expect(inbox.notifications.map((n) => n.headline)).toEqual([
       "Ana claimed a Seat on Test Course",
     ]);
+  });
+});
+
+describe("Read state", () => {
+  function notifyTeamAdmin(studentName: string) {
+    const [seat] = buySeats(teamAdmin.id, 1);
+    claimSeat(seat.id, addPerson(studentName).id);
+    return getInbox(db, teamAdmin.id).notifications[0];
+  }
+
+  it("marks a Notification read, taking it off the unread count", () => {
+    const notification = notifyTeamAdmin("Ana");
+
+    markRead(db, teamAdmin.id, notification.id);
+
+    const inbox = getInbox(db, teamAdmin.id);
+    expect(inbox.unreadCount).toBe(0);
+    expect(inbox.badgeLabel).toBeNull();
+    expect(inbox.notifications[0]).toMatchObject({
+      id: notification.id,
+      isRead: true,
+    });
+  });
+
+  it("changes nothing when asked to mark someone else's Notification", () => {
+    const notification = notifyTeamAdmin("Ana");
+    const stranger = addPerson("Sam");
+
+    markRead(db, stranger.id, notification.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(1);
+  });
+
+  it("marks a read Notification unread again, putting it back on the count", () => {
+    const notification = notifyTeamAdmin("Ana");
+    markRead(db, teamAdmin.id, notification.id);
+
+    markUnread(db, teamAdmin.id, notification.id);
+
+    const inbox = getInbox(db, teamAdmin.id);
+    expect(inbox.unreadCount).toBe(1);
+    expect(inbox.notifications[0].isRead).toBe(false);
+  });
+
+  it("won't mark someone else's Notification unread", () => {
+    const notification = notifyTeamAdmin("Ana");
+    markRead(db, teamAdmin.id, notification.id);
+
+    markUnread(db, addPerson("Sam").id, notification.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+  });
+
+  it("marks all read, including Notifications beyond the newest 20", () => {
+    const seats = buySeats(teamAdmin.id, 25);
+    seats.forEach((seat, i) => claimSeat(seat.id, addPerson(`S${i}`).id));
+
+    markAllRead(db, teamAdmin.id);
+
+    // The unread count spans every Notification, not just the listed 20.
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+  });
+
+  it("marks all read for only the given person", () => {
+    notifyTeamAdmin("Ana");
+    const otherTeamAdmin = addPerson("Otto");
+    const [theirs] = buySeats(otherTeamAdmin.id, 1);
+    claimSeat(theirs.id, addPerson("Ben").id);
+
+    markAllRead(db, teamAdmin.id);
+
+    expect(getInbox(db, teamAdmin.id).unreadCount).toBe(0);
+    expect(getInbox(db, otherTeamAdmin.id).unreadCount).toBe(1);
+  });
+
+  function addPlatformAdmin(name: string) {
+    const person = addPerson(name);
+    db.update(schema.users)
+      .set({ role: UserRole.Admin })
+      .where(eq(schema.users.id, person.id))
+      .run();
+    return person;
+  }
+
+  // A buyer raises a Refund Request, telling every Platform Admin.
+  function raiseRefundRequestFor(buyerName: string) {
+    const buyer = addPerson(buyerName);
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyer.id,
+        courseId: base.course.id,
+        amountPaid: 7900,
+        createdAt: NOW.toISOString(),
+      })
+      .returning()
+      .get();
+    const raised = raiseRefundRequest(
+      db,
+      purchase.id,
+      buyer.id,
+      "It was not what I expected at all.",
+      NOW
+    );
+    if (!raised.ok) throw new Error(raised.error);
+    notifyRefundRequestRaised(db, raised.refundRequestId);
+    return raised.refundRequestId;
+  }
+
+  it("leaves another person's copy of the same event unread", () => {
+    const pat = addPlatformAdmin("Pat");
+    const ada = addPlatformAdmin("Ada");
+    raiseRefundRequestFor("Liam");
+
+    markRead(db, pat.id, getInbox(db, pat.id).notifications[0].id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    expect(getInbox(db, ada.id).unreadCount).toBe(1);
+  });
+
+  it("leaves the Refund Requests work queue alone when marking all read", () => {
+    const pat = addPlatformAdmin("Pat");
+    const refundRequestId = raiseRefundRequestFor("Liam");
+
+    markAllRead(db, pat.id);
+
+    expect(getInbox(db, pat.id).unreadCount).toBe(0);
+    expect(
+      listRefundRequestsForReview(db, RefundStatus.Open, NOW).map((r) => r.id)
+    ).toEqual([refundRequestId]);
   });
 });
 
